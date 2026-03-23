@@ -1,0 +1,55 @@
+[package]
+name = "dit0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.32", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+ldap3_proto = "0.6"
+lmdb = "0.8"
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.21"
+lazy_static = "1.4"
+regex = "1.9"
+bytes = "1.4"
+futures = "0.3"
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+tower-sessions = "0.13.0"
+time = { version = "0.3.47", features = ["macros", "parsing", "formatting"] }
+tower-sessions-memory-store = "0.13.0"
+serde_urlencoded = "0.7.1"
+argon2 = "0.5.2"
+v_htmlescape = "0.15.8"
+rand = "0.8.5"
+uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
+password-hash = "0.5.0"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+base32 = "0.4"
+qrcode = "0.8"
+# Config parsing
+toml = "0.7"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+urlencoding = "2.1"
+oauth2 = "4.0"
+chrono = "0.4.44"
+libtailscale = "0.2"
+tracing-rfc-5424 = "0.2"
+syslog-tracing = "0.3.1"
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
+hyper = { version = "1.8.1", features = ["server", "http1", "http2"] }
+tokio-rustls = "0.26.4"
+rustls-pemfile = "2.2.0"
+rustls = "0.23.37"
+tailscale-localapi = "0.4.2"
