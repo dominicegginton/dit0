@@ -38,7 +38,7 @@ impl Server for HttpsServer {
         let ts_net = self.state.ts_net.clone();
         let tls_config = match ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(state.certs.0.clone(), state.certs.1.clone_key())
+            .with_single_cert(self.state.certs.0.clone(), self.state.certs.1.clone_key())
         {
             Ok(cfg) => cfg,
             Err(e) => {
@@ -59,12 +59,12 @@ impl Server for HttpsServer {
         let app = Router::new()
             .merge(protected_routes)
             .layer(TraceLayer::new_for_http())
-            .with_state(state.clone());
+            .with_state(self.state.clone());
 
         let state = self.state.clone();
 
         std::thread::spawn(move || {
-            let listener = match listener_ts.listen("tcp", ":443") {
+            let listener = match self.state.ts_net.listen("tcp", ":443") {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::error!("Failed to listen on tsnet: {}", e);
