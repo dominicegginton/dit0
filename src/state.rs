@@ -14,5 +14,5 @@ pub struct State {
     pub env: Arc<Environment>,
     pub lockout_db: Database,
     pub ts_net: Arc<TsNet>,
-    pub certs: std::sync::Arc<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>>,
+    pub certs: std::sync::Arc<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 }

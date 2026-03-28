@@ -1,7 +1,9 @@
 use crate::config::Config;
 use chrono::{DateTime, Utc};
 use reqwest::{header, Client, Method, Request, StatusCode, Url};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 use std::{collections::HashMap, error, fmt, sync::Arc};
 
 #[derive(Debug, Clone)]
@@ -15,7 +17,7 @@ pub struct Tailscale {
 }
 
 impl Tailscale {
-    pub fn new(config: Config) -> Self {
+    pub fn from_config(config: Config) -> Self {
         let client = Client::builder().build();
         match client {
             Ok(c) => Self {
@@ -296,6 +298,100 @@ impl Tailscale {
         }
 
         Ok(None)
+    }
+
+    /// Get the certificate and key for a domain. The domain should be one of
+    /// the valid domains for the local node.
+    pub async fn certificate_pair(
+        &self,
+        domain: &str,
+    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), APIError> {
+        let path = format!("cert/{}?type=pair", domain);
+        tracing::info!(
+            "LocalAPI certificate_pair request: domain={} path=/localapi/v0/{} local_api_addr={:?}",
+            domain,
+            path,
+            self.local_api_addr
+        );
+        let request = self.local_request(Method::GET, &path, (), None);
+
+        let resp = self.client.execute(request).await;
+
+        match resp {
+            Ok(r) => {
+                if r.status().is_success() {
+                    let bytes = r.bytes().await.map_err(|e| APIError {
+                        status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                        body: format!("reading body failed: {}", e),
+                    })?;
+
+                    // collect certificates as CertificateDer
+                    let mut cursor = Cursor::new(bytes.clone());
+                    let certs = rustls_pemfile::certs(&mut cursor)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| APIError {
+                            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                            body: format!("failed to read certs: {}", e),
+                        })?;
+
+                    let mut cursor2 = Cursor::new(bytes);
+                    let key_opt =
+                        rustls_pemfile::private_key(&mut cursor2).map_err(|e| APIError {
+                            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                            body: format!("failed to read private key: {}", e),
+                        })?;
+
+                    let key_der = key_opt.ok_or(APIError {
+                        status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                        body: "no private key found in response".to_string(),
+                    })?;
+
+                    Ok((certs, key_der))
+                } else {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    Err(APIError {
+                        status_code: status,
+                        body,
+                    })
+                }
+            }
+            Err(e) => Err(APIError {
+                status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                body: format!("LocalAPI request failed: {}", e),
+            }),
+        }
+    }
+
+    /// Get the status of the local node.
+    pub async fn status(&self) -> Result<serde_json::Value, APIError> {
+        let request = self.local_request(Method::GET, "status", (), None);
+
+        let resp = self.client.execute(request).await;
+
+        match resp {
+            Ok(r) => {
+                if r.status().is_success() {
+                    let json = r.json::<serde_json::Value>().await.map_err(|e| APIError {
+                        status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                        body: format!("failed to parse status json: {}", e),
+                    })?;
+
+                    Ok(json)
+                } else {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    Err(APIError {
+                        status_code: status,
+                        body,
+                    })
+                }
+            }
+            Err(e) => Err(APIError {
+                status_code: StatusCode::INTERNAL_SERVER_ERROR,
+                body: format!("LocalAPI request failed: {}", e),
+            }),
+        }
     }
 }
 

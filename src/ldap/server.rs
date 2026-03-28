@@ -1,8 +1,8 @@
-use crate::certs::CertLoader;
 use futures::{SinkExt, StreamExt};
 use ldap3_proto::LdapCodec;
 use lmdb::{Database, Environment};
-use rustls::ServerConfig as RustlsServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::ServerConfig;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
@@ -69,10 +69,22 @@ pub struct LdapServer {
     config: Config,
     tailscale: Tailscale,
     ts_net: Arc<libtailscale::Tailscale>,
+    tls_acceptor: TlsAcceptor,
 }
 
 impl LdapServer {
     pub fn from_state(state: crate::state::State) -> Self {
+        let cert_pair = state.certs.clone();
+        let cert_chain = cert_pair.0.clone();
+        let key = cert_pair.1.clone_key();
+
+        let tls_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .expect("invalid certs");
+
+        let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
         Self {
             env: state.env.clone(),
             otp_db: state.otp_db,
@@ -80,6 +92,7 @@ impl LdapServer {
             config: state.config,
             tailscale: state.tailscale,
             ts_net: state.ts_net,
+            tls_acceptor,
         }
     }
 }
@@ -93,24 +106,7 @@ impl crate::http::server::Server for LdapServer {
         let lockout_clone = self.lockout_db;
         let tailscale_clone = self.tailscale.clone();
         let base_dn = self.config.base_dn.clone();
-        let cert_dir = std::path::PathBuf::from(&self.config.data_dir)
-            .join("tsnet")
-            .join("certs");
-        let certs = crate::certs::Certificates::new(cert_dir);
-        let tls_config = match certs.load_certs() {
-            Ok((cert_chain, key)) => {
-                let config = RustlsServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_single_cert(cert_chain, key)
-                    .expect("invalid certs");
-                Arc::new(config)
-            }
-            Err(e) => {
-                error!("Failed to load TLS certs for LDAPS: {}", e);
-                return Err(e);
-            }
-        };
-        let tls_acceptor = TlsAcceptor::from(tls_config.clone());
+        let tls_acceptor = self.tls_acceptor.clone();
 
         let env_clone = env_clone.clone();
         let otp_clone = otp_clone.clone();

@@ -1,9 +1,17 @@
+use crate::objects;
+use crate::tailscale::LocalWhoIsResponse;
+use crate::tailscale::Tailscale;
+use base32;
+use hex;
+use hmac::{Hmac, Mac};
 use ldap3_proto::proto::{
-    LdapBindResponse, LdapExtendedResponse, LdapFilter, LdapMsg, LdapOp, LdapPartialAttribute,
-    LdapResult, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
+    LdapBindCred, LdapBindResponse, LdapExtendedResponse, LdapFilter, LdapMsg, LdapOp,
+    LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
 };
 use lmdb::{Database, Environment, Transaction};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,15 +23,6 @@ struct LockoutEntry {
     last_attempt: u64,
     locked_until: u64,
 }
-
-use crate::objects;
-use crate::tailscale::LocalWhoIsResponse;
-use crate::tailscale::Tailscale;
-use base32;
-use hex;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
-use sha2::Sha256;
 
 fn read_lockout(env: &Environment, db: Database, key: &str) -> Option<LockoutEntry> {
     if let Ok(txn) = env.begin_ro_txn() {
@@ -178,8 +177,6 @@ async fn handle_bind(
     base_dn: &str,
     client_addr: std::net::SocketAddr,
 ) -> Vec<LdapMsg> {
-    use ldap3_proto::proto::LdapBindCred;
-
     if bind.cred == LdapBindCred::Simple("".to_string()) && bind.dn == "" {
         return vec![LdapMsg {
             msgid,
@@ -196,7 +193,44 @@ async fn handle_bind(
         }];
     }
 
-    if let LdapBindCred::Simple(password) = &bind.cred {
+    // Support both Simple binds and SASL PLAIN binds (common for GUI clients)
+    let password_opt: Option<String> = match &bind.cred {
+        LdapBindCred::Simple(pw) => Some(pw.clone()),
+        LdapBindCred::SASL(sasl) => {
+            if sasl.mechanism.eq_ignore_ascii_case("PLAIN") {
+                if let Ok(s) = String::from_utf8(sasl.credentials.clone()) {
+                    // PLAIN message is: [authzid]\0authcid\0password
+                    let parts: Vec<&str> = s.split('\0').collect();
+                    let pass = if parts.len() >= 3 {
+                        parts[2]
+                    } else if parts.len() == 2 {
+                        parts[1]
+                    } else {
+                        ""
+                    };
+                    Some(pass.to_string())
+                } else {
+                    None
+                }
+            } else {
+                return vec![LdapMsg {
+                    msgid,
+                    op: LdapOp::BindResponse(LdapBindResponse {
+                        res: LdapResult {
+                            code: LdapResultCode::AuthMethodNotSupported,
+                            matcheddn: "".to_string(),
+                            message: format!("SASL mechanism {} not supported", sasl.mechanism),
+                            referral: vec![],
+                        },
+                        saslcreds: None,
+                    }),
+                    ctrl: vec![],
+                }];
+            }
+        }
+    };
+
+    if let Some(password) = password_opt {
         // Rate limiting: per-DN and per-IP
         const MAX_FAILURES: u32 = 5;
         const LOCKOUT_SECS: u64 = 300; // 5 minutes
