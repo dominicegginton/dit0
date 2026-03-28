@@ -24,15 +24,18 @@ pub trait Server {
 }
 
 pub struct HttpsServer {
-    app: Router,
     state: AppState,
-    tls_acceptor: TlsAcceptor,
-    ts_net: Arc<libtailscale::Tailscale>,
 }
 
 impl HttpsServer {
-    pub fn from_state(state: AppState) -> anyhow::Result<Self> {
-        let ts_net = state.ts_net.clone();
+    pub fn from_state(state: AppState) -> Self {
+        HttpsServer { state }
+    }
+}
+
+impl Server for HttpsServer {
+    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
+        let ts_net = self.state.ts_net.clone();
         let tls_config = match ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(state.certs.0.clone(), state.certs.1.clone_key())
@@ -58,20 +61,6 @@ impl HttpsServer {
             .layer(TraceLayer::new_for_http())
             .with_state(state.clone());
 
-        Ok(HttpsServer {
-            app,
-            state,
-            tls_acceptor,
-            ts_net,
-        })
-    }
-}
-
-impl Server for HttpsServer {
-    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
-        let listener_ts = self.ts_net.clone();
-        let app = self.app.clone();
-        let tls_acceptor = self.tls_acceptor.clone();
         let state = self.state.clone();
 
         std::thread::spawn(move || {

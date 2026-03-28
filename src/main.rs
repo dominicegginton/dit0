@@ -105,8 +105,7 @@ async fn main() -> anyhow::Result<()> {
     let ldap_state = state.clone();
 
     let http_handle = tokio::spawn(async move {
-        let server =
-            HttpsServer::from_state(http_state.clone()).expect("Failed to create HTTPS server");
+        let server = HttpsServer::from_state(http_state.clone());
         server
             .spawn(tokio::runtime::Handle::current())
             .expect("Failed to spawn HTTPS server");
