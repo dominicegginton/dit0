@@ -99,7 +99,6 @@ impl LdapServer {
 
 impl crate::http::server::Server for LdapServer {
     fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
-        let ts = self.ts_net.clone();
         let ldaps_port = "636".to_string();
         let env_clone = self.env.clone();
         let otp_clone = self.otp_db; // copy
@@ -113,68 +112,47 @@ impl crate::http::server::Server for LdapServer {
         let tailscale_clone = tailscale_clone.clone();
         let base_dn = base_dn.clone();
         std::thread::spawn(move || {
-            let listener = match self.ts_net.listen("tcp", &format!(":{}", ldaps_port)) {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Failed to listen on LDAPS port {}: {}", ldaps_port, e);
-                    return;
-                }
-            };
+            let listener = self
+                .ts_net
+                .listen("tcp", &format!(":{}", ldaps_port))
+                .expect("Failed to listen on LDAPS port");
+
             loop {
                 match listener.accept() {
                     Ok(stream) => {
-                        if let Err(e) = stream.set_nonblocking(true) {
-                            error!("Failed to set nonblocking on tsnet stream: {}", e);
-                            continue;
-                        }
+                        let _ = stream
+                            .set_nonblocking(true)
+                            .expect("Failed to set nonblocking on stream");
 
-                        let peer_addr = match listener.get_remote_addr(stream.as_raw_fd()) {
-                            Ok(ip) => std::net::SocketAddr::new(ip, 0),
-                            Err(_) => {
-                                error!("Failed to get peer address for incoming LDAPS connection");
-                                continue;
-                            }
-                        };
-                        let stream = {
-                            let _guard = handle.enter();
-                            match tokio::net::TcpStream::from_std(stream) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    tracing::error!("Failed to convert to tokio stream: {}", e);
-                                    continue;
-                                }
-                            }
-                        };
+                        let peer_addr = listener
+                            .get_remote_addr(stream.as_raw_fd())
+                            .expect("Failed to get peer address for incoming LDAPS connection");
+
+                        let _ = handle.enter();
+                        let stream = tokio::net::TcpStream::from_std(stream)
+                            .expect("Failed to convert to tokio stream");
 
                         let env = env_clone.clone();
                         let otp = otp_clone;
                         let ts_api = tailscale_clone.clone();
                         let base_dn = base_dn.clone();
                         let tls_acceptor = tls_acceptor.clone();
+
                         std::thread::spawn(move || {
-                            let rt = match tokio::runtime::Builder::new_current_thread()
+                            let rt = tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
-                            {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    error!("Failed to build per-connection runtime: {}", e);
-                                    return;
-                                }
-                            };
+                                .expect("Failed to build per-connection runtime");
 
                             rt.block_on(async move {
-                                let tls_stream = match tls_acceptor.accept(stream).await {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        error!("Failed to accept TLS connection: {}", e);
-                                        return;
-                                    }
-                                };
+                                let tls_stream = tls_acceptor
+                                    .accept(stream)
+                                    .await
+                                    .expect("Failed to accept TLS connection");
 
                                 handle_client(
                                     tls_stream,
-                                    peer_addr,
+                                    std::net::SocketAddr::new(peer_addr, 0),
                                     env.clone(),
                                     otp,
                                     lockout_clone,

@@ -35,17 +35,10 @@ impl HttpsServer {
 
 impl Server for HttpsServer {
     fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
-        let ts_net = self.state.ts_net.clone();
-        let tls_config = match ServerConfig::builder()
+        let tls_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(self.state.certs.0.clone(), self.state.certs.1.clone_key())
-        {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::error!("Failed to create TLS config: {}", e);
-                return Err(anyhow::anyhow!(e));
-            }
-        };
+            .expect("Failed to create TLS config");
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -64,56 +57,33 @@ impl Server for HttpsServer {
         let state = self.state.clone();
 
         std::thread::spawn(move || {
-            let listener = match self.state.ts_net.listen("tcp", ":443") {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!("Failed to listen on tsnet: {}", e);
-                    return;
-                }
-            };
+            let listener = self
+                .state
+                .ts_net
+                .listen("tcp", ":443")
+                .expect("Failed to listen on tsnet");
 
             loop {
                 match listener.accept() {
                     Ok(stream) => {
-                        if let Err(e) = stream.set_nonblocking(true) {
-                            tracing::error!("Failed to set nonblocking on stream: {}", e);
-                            continue;
-                        }
+                        let _ = stream
+                            .set_nonblocking(true)
+                            .expect("Failed to set nonblocking on stream");
 
-                        let peer_addr = match listener.get_remote_addr(stream.as_raw_fd()) {
-                            Ok(addr) => addr,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to get peer address from tsnet listener: {}",
-                                    e
-                                );
-                                continue;
-                            }
-                        };
+                        let peer_addr = listener
+                            .get_remote_addr(stream.as_raw_fd())
+                            .expect("Failed to get peer address for incoming HTTPS connection");
 
-                        let stream = {
-                            let _guard = handle.enter();
-                            match tokio::net::TcpStream::from_std(stream) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    tracing::error!("Failed to convert to tokio stream: {}", e);
-                                    continue;
-                                }
-                            }
-                        };
+                        let _ = handle.enter();
+                        let stream = tokio::net::TcpStream::from_std(stream)
+                            .expect("Failed to convert to tokio stream");
 
                         let app = app.clone();
                         let tls_acceptor = tls_acceptor.clone();
                         let state = state.clone();
 
                         handle.spawn(async move {
-                            let tls_stream = match tls_acceptor.accept(stream).await {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    tracing::error!("TLS handshake failed: {}", e);
-                                    return;
-                                }
-                            };
+                            let tls_stream = tls_acceptor.accept(stream).await.expect("Failed to accept TLS connection");
 
                             let io = TokioIo::new(tls_stream);
                             let service = hyper::service::service_fn(
@@ -121,13 +91,7 @@ impl Server for HttpsServer {
                                     let mut app = app.clone();
                                     let state = state.clone();
                                     async move {
-                                        let whois = match state.tailscale.whois(peer_addr).await {
-                                            Ok(w) => w,
-                                            Err(e) => {
-                                                tracing::warn!("whois lookup failed for {}: {}", peer_addr, e);
-                                                None
-                                            }
-                                        };
+                                        let whois = state.tailscale.whois(peer_addr).await.expect("Failed to perform whois lookup");
 
                                         let (parts, body) = req.into_parts();
                                         let mut req = Request::from_parts(parts, axum::body::Body::new(body));
@@ -216,10 +180,12 @@ impl Server for HttpsServer {
                                                                 Ok(r) => r,
                                                                 Err(e) => {
                                                                     tracing::error!("Failed to build response: {}", e);
-                                                                    return Ok::<_, Infallible>(hyper::Response::builder()
+                                                                    let resp = hyper::Response::builder()
                                                                         .status(500)
                                                                         .body(axum::body::Body::from("Internal error"))
-                                                                        .unwrap());
+                                                                        .unwrap();
+
+                                                                    resp
                                                                 }
                                                             };
                                                             return Ok::<_, Infallible>(resp);
@@ -236,11 +202,9 @@ impl Server for HttpsServer {
                                 },
                             );
 
-                            if let Err(err) =
-                                http1::Builder::new().serve_connection(io, service).await
-                            {
-                                tracing::error!("Error serving connection: {}", err);
-                            }
+
+
+                            let _ = http1::Builder::new().serve_connection(io, service).await.expect("Failed to serve connection");
                         });
                     }
                     Err(e) => {
