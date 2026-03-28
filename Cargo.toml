@@ -21,6 +21,7 @@ regex = "1.9"
 bytes = "1.4"
 futures = "0.3"
 axum = { version = "0.7", features = ["macros"] }
+image = "0.23.12"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 tower-sessions = "0.13.0"
