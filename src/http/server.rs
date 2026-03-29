@@ -20,6 +20,7 @@ use tower::Service;
 use tower_http::trace::TraceLayer;
 
 pub trait Server {
+    fn from_state(state: AppState) -> Self;
     fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()>;
 }
 
@@ -27,13 +28,10 @@ pub struct HttpsServer {
     state: AppState,
 }
 
-impl HttpsServer {
-    pub fn from_state(state: AppState) -> Self {
+impl Server for HttpsServer {
+    fn from_state(state: AppState) -> Self {
         HttpsServer { state }
     }
-}
-
-impl Server for HttpsServer {
     fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
         let tls_config = ServerConfig::builder()
             .with_no_client_auth()
@@ -74,15 +72,13 @@ impl Server for HttpsServer {
                             .get_remote_addr(stream.as_raw_fd())
                             .expect("Failed to get peer address for incoming HTTPS connection");
 
-                        let _ = handle.enter();
-                        let stream = tokio::net::TcpStream::from_std(stream)
-                            .expect("Failed to convert to tokio stream");
-
                         let app = app.clone();
                         let tls_acceptor = tls_acceptor.clone();
                         let state = state.clone();
 
                         handle.spawn(async move {
+                        let stream = tokio::net::TcpStream::from_std(stream)
+                            .expect("Failed to convert to tokio stream");
                             let tls_stream = tls_acceptor.accept(stream).await.expect("Failed to accept TLS connection");
 
                             let io = TokioIo::new(tls_stream);

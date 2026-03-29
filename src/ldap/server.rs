@@ -63,18 +63,16 @@ pub async fn handle_client(
 }
 
 pub struct LdapServer {
-    env: Arc<Environment>,
-    otp_db: Database,
-    lockout_db: Database,
-    config: Config,
-    tailscale: Tailscale,
-    ts_net: Arc<libtailscale::Tailscale>,
-    tls_acceptor: TlsAcceptor,
+    state: crate::state::State,
 }
 
-impl LdapServer {
-    pub fn from_state(state: crate::state::State) -> Self {
-        let cert_pair = state.certs.clone();
+impl crate::http::server::Server for LdapServer {
+    fn from_state(state: crate::state::State) -> Self {
+        Self { state }
+    }
+
+    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
+        let cert_pair = self.state.certs.clone();
         let cert_chain = cert_pair.0.clone();
         let key = cert_pair.1.clone_key();
 
@@ -84,53 +82,32 @@ impl LdapServer {
             .expect("invalid certs");
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
-        Self {
-            env: state.env.clone(),
-            otp_db: state.otp_db,
-            lockout_db: state.lockout_db,
-            config: state.config,
-            tailscale: state.tailscale,
-            ts_net: state.ts_net,
-            tls_acceptor,
-        }
-    }
-}
-
-impl crate::http::server::Server for LdapServer {
-    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
         let ldaps_port = "636".to_string();
-        let env_clone = self.env.clone();
-        let otp_clone = self.otp_db; // copy
-        let lockout_clone = self.lockout_db;
-        let tailscale_clone = self.tailscale.clone();
-        let base_dn = self.config.base_dn.clone();
-        let tls_acceptor = self.tls_acceptor.clone();
+        let env_clone = self.state.env.clone();
+        let otp_clone = self.state.otp_db; // copy
+        let lockout_clone = self.state.lockout_db;
+        let tailscale_clone = self.state.tailscale.clone();
+        let base_dn = self.state.config.base_dn.clone();
 
-        let env_clone = env_clone.clone();
-        let otp_clone = otp_clone.clone();
-        let tailscale_clone = tailscale_clone.clone();
-        let base_dn = base_dn.clone();
         std::thread::spawn(move || {
-            let listener = self
-                .ts_net
-                .listen("tcp", &format!(":{}", ldaps_port))
-                .expect("Failed to listen on LDAPS port");
+            let listener = match self.state.ts_net.listen("tcp", &format!(":{}", ldaps_port)) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("Failed to listen on LDAPS port {}: {}", ldaps_port, e);
+                    return;
+                }
+            };
 
             loop {
                 match listener.accept() {
                     Ok(stream) => {
                         let _ = stream
                             .set_nonblocking(true)
-                            .expect("Failed to set nonblocking on stream");
+                            .expect("Failed to set nonblocking on tsnet stream");
 
                         let peer_addr = listener
                             .get_remote_addr(stream.as_raw_fd())
                             .expect("Failed to get peer address for incoming LDAPS connection");
-
-                        let _ = handle.enter();
-                        let stream = tokio::net::TcpStream::from_std(stream)
-                            .expect("Failed to convert to tokio stream");
 
                         let env = env_clone.clone();
                         let otp = otp_clone;
@@ -145,6 +122,9 @@ impl crate::http::server::Server for LdapServer {
                                 .expect("Failed to build per-connection runtime");
 
                             rt.block_on(async move {
+                                let stream = tokio::net::TcpStream::from_std(stream)
+                                    .expect("Failed to convert to tokio stream");
+
                                 let tls_stream = tls_acceptor
                                     .accept(stream)
                                     .await
