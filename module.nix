@@ -11,7 +11,7 @@
     package = lib.mkPackageOption pkgs "dit0" { };
   };
 
-  config = lib.mkIf config.programs.dit0.enable {
+  config = lib.mkIf config.services.dit0.enable {
     environment.systemPackages = [ config.services.dit0.package ];
 
     systemd.packages = [ config.services.dit0.package ];
