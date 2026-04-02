@@ -18,7 +18,6 @@
 
     systemd.services.dit0 = {
       description = config.services.dit0.package.meta.description;
-      wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         ExecStart = "${config.services.dit0.package}/bin/dit0";
         Restart = "on-failure";
