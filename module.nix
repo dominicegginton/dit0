@@ -5,7 +5,7 @@
 }:
 
 {
-  options.programs.dit0 = {
+  options.services.dit0 = {
     enable = lib.mkEnableOption "dit0";
 
     package = lib.mkPackageOption pkgs "dit0" { };
