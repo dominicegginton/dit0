@@ -12,15 +12,15 @@
   };
 
   config = lib.mkIf config.programs.dit0.enable {
-    environment.systemPackages = [ config.programs.dit0.package ];
+    environment.systemPackages = [ config.services.dit0.package ];
 
-    systemd.packages = [ config.programs.dit0.package ];
+    systemd.packages = [ config.services.dit0.package ];
 
     systemd.services.dit0 = {
-      description = config.programs.dit0.description;
+      description = config.services.dit0.package.description;
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
-        ExecStart = "${config.programs.dit0.package}/bin/dit0";
+        ExecStart = "${config.services.dit0.package}/bin/dit0";
         Restart = "on-failure";
         RestartSec = 5;
       };
