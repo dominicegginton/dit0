@@ -52,10 +52,10 @@ impl Server for HttpsServer {
         let state = self.state.clone();
 
         std::thread::spawn(move || {
-            let listener = self
-                .state
+            let address = format!(":{}", state.config.web_port);
+            let listener = state
                 .ts_net
-                .listen("tcp", ":443")
+                .listen("tcp", &address)
                 .expect("Failed to listen on tsnet");
 
             loop {

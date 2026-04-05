@@ -1,5 +1,5 @@
 {
-  "ldap_port": 389,
+  "ldap_port": 636,
   "web_port": 443,
   "ts_api_base_url": "https://api.tailscale.com/api/v2",
   "ts_api_key_file": "./ts_api_key",

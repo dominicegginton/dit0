@@ -84,7 +84,6 @@ impl crate::http::server::Server for LdapServer {
             .expect("invalid certs");
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-        let ldaps_port = "636".to_string();
         let env_clone = self.state.env.clone();
         let otp_clone = self.state.otp_db; // copy
         let lockout_clone = self.state.lockout_db;
@@ -93,13 +92,12 @@ impl crate::http::server::Server for LdapServer {
         let base_dn = self.state.config.base_dn.clone();
 
         std::thread::spawn(move || {
-            let listener = match self.state.ts_net.listen("tcp", &format!(":{}", ldaps_port)) {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Failed to listen on LDAPS port {}: {}", ldaps_port, e);
-                    return;
-                }
-            };
+            let address = format!(":{}", self.state.config.ldap_port);
+            let listener = self
+                .state
+                .ts_net
+                .listen("tcp", &address)
+                .expect("Failed to listen on LDAPS port");
 
             loop {
                 match listener.accept() {
