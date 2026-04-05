@@ -740,6 +740,57 @@ async fn handle_search(
     base_dn: &str,
     search: ldap3_proto::proto::LdapSearchRequest,
 ) -> Vec<LdapMsg> {
+    // RootDSE: base scope search on empty DN
+    if search.base.is_empty() && matches!(search.scope, LdapSearchScope::Base) {
+        let attrs = vec![
+            LdapPartialAttribute {
+                atype: "namingContexts".to_string(),
+                vals: vec![base_dn.as_bytes().to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "supportedLDAPVersion".to_string(),
+                vals: vec![b"3".to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "supportedSASLMechanisms".to_string(),
+                vals: vec![b"PLAIN".to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "supportedExtension".to_string(),
+                vals: vec![b"1.3.6.1.4.1.1466.20037".to_vec()], // StartTLS
+            },
+            LdapPartialAttribute {
+                atype: "subschemaSubentry".to_string(),
+                vals: vec![b"cn=Subschema".to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "vendorName".to_string(),
+                vals: vec![b"dit0".to_vec()],
+            },
+        ];
+
+        return vec![
+            LdapMsg {
+                msgid,
+                op: LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                    dn: "".to_string(),
+                    attributes: attrs,
+                }),
+                ctrl: vec![],
+            },
+            LdapMsg {
+                msgid,
+                op: LdapOp::SearchResultDone(LdapResult {
+                    code: LdapResultCode::Success,
+                    matcheddn: "".to_string(),
+                    message: "".to_string(),
+                    referral: vec![],
+                }),
+                ctrl: vec![],
+            },
+        ];
+    }
+
     // Check if this is a posixGroup search
     let is_posix_group_search = {
         // Look for objectClass=posixGroup in the filter
