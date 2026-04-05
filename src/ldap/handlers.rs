@@ -10,53 +10,12 @@ use ldap3_proto::proto::{
     LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
 };
 use lmdb::{Database, Environment, Transaction};
-use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-struct LockoutEntry {
-    failures: u32,
-    last_attempt: u64,
-    locked_until: u64,
-}
-
-fn read_lockout(env: &Environment, db: Database, key: &str) -> Option<LockoutEntry> {
-    if let Ok(txn) = env.begin_ro_txn() {
-        if let Ok(val) = txn.get(db, &key.as_bytes()) {
-            if let Ok(entry) = serde_json::from_slice::<LockoutEntry>(val) {
-                return Some(entry);
-            }
-        }
-    }
-    None
-}
-
-fn write_lockout(env: &Environment, db: Database, key: &str, entry: &LockoutEntry) -> bool {
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        if let Ok(v) = serde_json::to_vec(entry) {
-            if txn
-                .put(db, &key.as_bytes(), &v, lmdb::WriteFlags::empty())
-                .is_ok()
-            {
-                return txn.commit().is_ok();
-            }
-        }
-    }
-    false
-}
-
-fn delete_lockout(env: &Environment, db: Database, key: &str) -> bool {
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        let _ = txn.del(db, &key.as_bytes(), None);
-        return txn.commit().is_ok();
-    }
-    false
-}
 
 fn matches_filter(filter: &LdapFilter, attrs: &HashMap<String, Vec<String>>) -> bool {
     match filter {
@@ -171,7 +130,6 @@ async fn check_whois_tagged_devices(
 async fn handle_bind(
     env: Arc<Environment>,
     otp_db: Database,
-    lockout_db: Database,
     tailscale: &Tailscale,
     config: &Config,
     bind: ldap3_proto::proto::LdapBindRequest,
@@ -233,52 +191,11 @@ async fn handle_bind(
     };
 
     if let Some(password) = password_opt {
-        // Rate limiting: per-DN and per-IP
-        const MAX_FAILURES: u32 = 5;
-        const LOCKOUT_SECS: u64 = 300; // 5 minutes
-
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let dn_key = format!("dn:{}", bind.dn);
-        let ip_key = format!("ip:{}", client_addr.ip());
-
-        if let Some(entry) = read_lockout(&env, lockout_db, &dn_key) {
-            if entry.locked_until > now {
-                return vec![LdapMsg {
-                    msgid,
-                    op: LdapOp::BindResponse(LdapBindResponse {
-                        res: LdapResult {
-                            code: LdapResultCode::OperationsError,
-                            matcheddn: "".to_string(),
-                            message: "Too many failed attempts for this DN; try later".to_string(),
-                            referral: vec![],
-                        },
-                        saslcreds: None,
-                    }),
-                    ctrl: vec![],
-                }];
-            }
-        }
-        if let Some(entry) = read_lockout(&env, lockout_db, &ip_key) {
-            if entry.locked_until > now {
-                return vec![LdapMsg {
-                    msgid,
-                    op: LdapOp::BindResponse(LdapBindResponse {
-                        res: LdapResult {
-                            code: LdapResultCode::OperationsError,
-                            matcheddn: "".to_string(),
-                            message: "Too many failed attempts from this IP; try later".to_string(),
-                            referral: vec![],
-                        },
-                        saslcreds: None,
-                    }),
-                    ctrl: vec![],
-                }];
-            }
-        }
         let username = bind
             .dn
             .split(',')
@@ -448,26 +365,6 @@ async fn handle_bind(
                 let provided_totp = parts.next().unwrap_or("");
 
                 if provided_pass.is_empty() || provided_totp.is_empty() {
-                    // bump counters
-                    {
-                        let mut e = read_lockout(&env, lockout_db, &dn_key).unwrap_or_default();
-                        e.failures = e.failures.saturating_add(1);
-                        e.last_attempt = now;
-                        if e.failures >= MAX_FAILURES {
-                            e.locked_until = now + LOCKOUT_SECS;
-                            e.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &dn_key, &e);
-
-                        let mut e2 = read_lockout(&env, lockout_db, &ip_key).unwrap_or_default();
-                        e2.failures = e2.failures.saturating_add(1);
-                        e2.last_attempt = now;
-                        if e2.failures >= MAX_FAILURES {
-                            e2.locked_until = now + LOCKOUT_SECS;
-                            e2.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &ip_key, &e2);
-                    }
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -511,26 +408,6 @@ async fn handle_bind(
                 let provided_hash = hex::encode(mac_pw.finalize().into_bytes());
 
                 if provided_hash != *stored_pw_hmac {
-                    // wrong password part; bump counters
-                    {
-                        let mut e = read_lockout(&env, lockout_db, &dn_key).unwrap_or_default();
-                        e.failures = e.failures.saturating_add(1);
-                        e.last_attempt = now;
-                        if e.failures >= MAX_FAILURES {
-                            e.locked_until = now + LOCKOUT_SECS;
-                            e.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &dn_key, &e);
-
-                        let mut e2 = read_lockout(&env, lockout_db, &ip_key).unwrap_or_default();
-                        e2.failures = e2.failures.saturating_add(1);
-                        e2.last_attempt = now;
-                        if e2.failures >= MAX_FAILURES {
-                            e2.locked_until = now + LOCKOUT_SECS;
-                            e2.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &ip_key, &e2);
-                    }
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -596,9 +473,6 @@ async fn handle_bind(
                 }
 
                 if ok {
-                    // clear any attempt counters for this DN/IP on success (persistent)
-                    let _ = delete_lockout(&env, lockout_db, &dn_key);
-                    let _ = delete_lockout(&env, lockout_db, &ip_key);
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -613,26 +487,6 @@ async fn handle_bind(
                         ctrl: vec![],
                     }];
                 } else {
-                    // increment failure counters for DN and IP (persistent)
-                    {
-                        let mut e = read_lockout(&env, lockout_db, &dn_key).unwrap_or_default();
-                        e.failures = e.failures.saturating_add(1);
-                        e.last_attempt = now;
-                        if e.failures >= MAX_FAILURES {
-                            e.locked_until = now + LOCKOUT_SECS;
-                            e.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &dn_key, &e);
-
-                        let mut e2 = read_lockout(&env, lockout_db, &ip_key).unwrap_or_default();
-                        e2.failures = e2.failures.saturating_add(1);
-                        e2.last_attempt = now;
-                        if e2.failures >= MAX_FAILURES {
-                            e2.locked_until = now + LOCKOUT_SECS;
-                            e2.failures = 0;
-                        }
-                        let _ = write_lockout(&env, lockout_db, &ip_key, &e2);
-                    }
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -648,26 +502,6 @@ async fn handle_bind(
                     }];
                 }
             } else {
-                // increment failure counters for DN and IP (persistent)
-                {
-                    let mut e = read_lockout(&env, lockout_db, &dn_key).unwrap_or_default();
-                    e.failures = e.failures.saturating_add(1);
-                    e.last_attempt = now;
-                    if e.failures >= MAX_FAILURES {
-                        e.locked_until = now + LOCKOUT_SECS;
-                        e.failures = 0;
-                    }
-                    let _ = write_lockout(&env, lockout_db, &dn_key, &e);
-
-                    let mut e2 = read_lockout(&env, lockout_db, &ip_key).unwrap_or_default();
-                    e2.failures = e2.failures.saturating_add(1);
-                    e2.last_attempt = now;
-                    if e2.failures >= MAX_FAILURES {
-                        e2.locked_until = now + LOCKOUT_SECS;
-                        e2.failures = 0;
-                    }
-                    let _ = write_lockout(&env, lockout_db, &ip_key, &e2);
-                }
                 return vec![LdapMsg {
                     msgid,
                     op: LdapOp::BindResponse(LdapBindResponse {
@@ -683,26 +517,6 @@ async fn handle_bind(
                 }];
             }
         } else {
-            // increment failure counters for DN and IP (persistent)
-            {
-                let mut e = read_lockout(&env, lockout_db, &dn_key).unwrap_or_default();
-                e.failures = e.failures.saturating_add(1);
-                e.last_attempt = now;
-                if e.failures >= MAX_FAILURES {
-                    e.locked_until = now + LOCKOUT_SECS;
-                    e.failures = 0;
-                }
-                let _ = write_lockout(&env, lockout_db, &dn_key, &e);
-
-                let mut e2 = read_lockout(&env, lockout_db, &ip_key).unwrap_or_default();
-                e2.failures = e2.failures.saturating_add(1);
-                e2.last_attempt = now;
-                if e2.failures >= MAX_FAILURES {
-                    e2.locked_until = now + LOCKOUT_SECS;
-                    e2.failures = 0;
-                }
-                let _ = write_lockout(&env, lockout_db, &ip_key, &e2);
-            }
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
@@ -1029,7 +843,6 @@ async fn handle_search(
 pub async fn handle_request(
     env: Arc<Environment>,
     otp_db: Database,
-    lockout_db: Database,
     base_dn: &str,
     req: LdapMsg,
     tailscale: &Tailscale,
@@ -1051,7 +864,6 @@ pub async fn handle_request(
             handle_bind(
                 env,
                 otp_db,
-                lockout_db,
                 tailscale,
                 config,
                 bind,

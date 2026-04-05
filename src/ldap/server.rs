@@ -17,7 +17,6 @@ pub async fn handle_client(
     addr: std::net::SocketAddr,
     env: Arc<Environment>,
     otp_db: Database,
-    lockout_db: Database,
     tailscale: Tailscale,
     config: Config,
     base_dn: String,
@@ -41,14 +40,11 @@ pub async fn handle_client(
             Ok(req) => {
                 let env_c = env.clone();
                 let otp_c = otp_db;
-                let lockout_c = lockout_db;
                 let ts_c = tailscale.clone();
                 let base_dn_c = base_dn.clone();
                 let peer = addr;
-                let resp = handle_request(
-                    env_c, otp_c, lockout_c, &base_dn_c, req, &ts_c, &config, peer,
-                )
-                .await;
+                let resp =
+                    handle_request(env_c, otp_c, &base_dn_c, req, &ts_c, &config, peer).await;
                 for msg in resp {
                     if let Err(e) = framed.send(msg).await {
                         error!("Failed to send response: {}", e);
@@ -86,7 +82,6 @@ impl crate::http::server::Server for LdapServer {
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
         let env_clone = self.state.env.clone();
         let otp_clone = self.state.otp_db; // copy
-        let lockout_clone = self.state.lockout_db;
         let tailscale_clone = self.state.tailscale.clone();
         let config_clone = self.state.config.clone();
         let base_dn = self.state.config.base_dn.clone();
@@ -137,7 +132,6 @@ impl crate::http::server::Server for LdapServer {
                                     std::net::SocketAddr::new(peer_addr, 0),
                                     env.clone(),
                                     otp,
-                                    lockout_clone,
                                     ts_api,
                                     config,
                                     base_dn,

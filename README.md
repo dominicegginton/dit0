@@ -9,7 +9,6 @@ LDAP server backed by Tailscale, providing user and device directory services ov
 - POSIX account and group attributes derived from Tailscale ACL grants
 - Web UI for credential setup (password + TOTP)
 - RootDSE support for LDAP client auto-discovery
-- Rate limiting and account lockout
 
 ## Configuration
 
@@ -45,3 +44,8 @@ CONFIG_FILE=config.json ./target/release/dit0
 ```
 
 The server joins your tailnet and listens on LDAPS (636) and HTTPS (443). Users access the web UI to set up their password and TOTP, then authenticate to LDAP-bound devices with `password::totp_code`.
+
+## Future Scope
+
+- Audit logging for bind and search operations
+- Full RFC 4512 compliance for schema-aware clients

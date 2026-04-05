@@ -12,7 +12,6 @@ pub struct State {
     pub tailscale: Tailscale,
     pub otp_db: Database,
     pub env: Arc<Environment>,
-    pub lockout_db: Database,
     pub ts_net: Arc<TsNet>,
     pub certs: std::sync::Arc<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 }

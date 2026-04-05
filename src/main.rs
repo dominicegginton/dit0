@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&lmdb_dir).expect("Failed to create lmdb directory");
 
     let env = Environment::new()
-        .set_max_dbs(3)
+        .set_max_dbs(2)
         .set_map_size(10 * 1024 * 1024)
         .open(&lmdb_dir)
         .expect("Failed to open LMDB environment");
@@ -78,10 +78,6 @@ async fn main() -> anyhow::Result<()> {
     let otp_db = env
         .create_db(Some("otp"), flags)
         .expect("Failed to create OTP database");
-
-    let lockout_db = env
-        .create_db(Some("lockouts"), flags)
-        .expect("Failed to create lockouts database");
 
     let owned_certs = ts_api
         .certificate_pair(&preferred_cert_domain)
@@ -93,7 +89,6 @@ async fn main() -> anyhow::Result<()> {
         tailscale: ts_api.clone(),
         otp_db: otp_db.clone(),
         env: Arc::new(env),
-        lockout_db: lockout_db.clone(),
         ts_net: Arc::new(ts_net),
         certs: std::sync::Arc::new((owned_certs.0.clone(), owned_certs.1.clone_key())),
     };
