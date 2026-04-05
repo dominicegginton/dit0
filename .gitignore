@@ -1,4 +1,5 @@
 target
 lmdb
 tsnet
-.env
+otp_hmac_key
+ts_api_key

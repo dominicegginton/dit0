@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::objects;
 use crate::tailscale::LocalWhoIsResponse;
 use crate::tailscale::Tailscale;
@@ -172,6 +173,7 @@ async fn handle_bind(
     otp_db: Database,
     lockout_db: Database,
     tailscale: &Tailscale,
+    config: &Config,
     bind: ldap3_proto::proto::LdapBindRequest,
     msgid: i32,
     base_dn: &str,
@@ -482,10 +484,12 @@ async fn handle_bind(
                 }
 
                 // verify password HMAC
-                let hmac_key = match std::env::var("OTP_HMAC_KEY") {
-                    Ok(k) => k,
-                    Err(_) => {
-                        tracing::error!("OTP_HMAC_KEY not set; cannot verify OTP");
+                let hmac_key = match config.otp_hmac_key() {
+                    Some(k) if !k.is_empty() => k,
+                    _ => {
+                        tracing::error!(
+                            "otp_hmac_key_file not configured or empty; cannot verify credentials"
+                        );
                         return vec![LdapMsg {
                             msgid,
                             op: LdapOp::BindResponse(LdapBindResponse {
@@ -978,6 +982,7 @@ pub async fn handle_request(
     base_dn: &str,
     req: LdapMsg,
     tailscale: &Tailscale,
+    config: &Config,
     client_addr: std::net::SocketAddr,
 ) -> Vec<LdapMsg> {
     let msgid = req.msgid;
@@ -997,6 +1002,7 @@ pub async fn handle_request(
                 otp_db,
                 lockout_db,
                 tailscale,
+                config,
                 bind,
                 msgid,
                 base_dn,

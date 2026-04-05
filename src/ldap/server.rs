@@ -1,7 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use ldap3_proto::LdapCodec;
 use lmdb::{Database, Environment};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -20,6 +19,7 @@ pub async fn handle_client(
     otp_db: Database,
     lockout_db: Database,
     tailscale: Tailscale,
+    config: Config,
     base_dn: String,
 ) {
     let mut stream = socket;
@@ -45,8 +45,10 @@ pub async fn handle_client(
                 let ts_c = tailscale.clone();
                 let base_dn_c = base_dn.clone();
                 let peer = addr;
-                let resp =
-                    handle_request(env_c, otp_c, lockout_c, &base_dn_c, req, &ts_c, peer).await;
+                let resp = handle_request(
+                    env_c, otp_c, lockout_c, &base_dn_c, req, &ts_c, &config, peer,
+                )
+                .await;
                 for msg in resp {
                     if let Err(e) = framed.send(msg).await {
                         error!("Failed to send response: {}", e);
@@ -87,6 +89,7 @@ impl crate::http::server::Server for LdapServer {
         let otp_clone = self.state.otp_db; // copy
         let lockout_clone = self.state.lockout_db;
         let tailscale_clone = self.state.tailscale.clone();
+        let config_clone = self.state.config.clone();
         let base_dn = self.state.config.base_dn.clone();
 
         std::thread::spawn(move || {
@@ -112,6 +115,7 @@ impl crate::http::server::Server for LdapServer {
                         let env = env_clone.clone();
                         let otp = otp_clone;
                         let ts_api = tailscale_clone.clone();
+                        let config = config_clone.clone();
                         let base_dn = base_dn.clone();
                         let tls_acceptor = tls_acceptor.clone();
 
@@ -137,6 +141,7 @@ impl crate::http::server::Server for LdapServer {
                                     otp,
                                     lockout_clone,
                                     ts_api,
+                                    config,
                                     base_dn,
                                 )
                                 .await

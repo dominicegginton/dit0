@@ -1,5 +1,5 @@
 // #![deny(warnings)]
-#![allow(clippy::result_large_err)]
+// #![allow(clippy::result_large_err)]
 
 mod config;
 mod http;
@@ -8,16 +8,13 @@ mod objects;
 mod state;
 mod tailscale;
 
-use crate::config::Config;
 use crate::http::server::HttpsServer;
 use crate::http::server::Server;
 use crate::ldap::LdapServer;
 
-use lmdb::{Database, Environment};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use lmdb::Environment;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use std::path::Path;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -29,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .expect("failed to initialize tracing");
 
-    let config = config::Config::new();
+    let config = config::Config::from_file();
 
     let mut ts_api = tailscale::Tailscale::from_config(config.clone());
     let mut ts_net = libtailscale::Tailscale::new();

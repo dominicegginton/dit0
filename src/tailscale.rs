@@ -19,10 +19,11 @@ pub struct Tailscale {
 impl Tailscale {
     pub fn from_config(config: Config) -> Self {
         let client = Client::builder().build();
+        let key = config.ts_api_key().expect("failed to read ts_api_key_file");
         match client {
             Ok(c) => Self {
                 base_url: config.ts_api_base_url,
-                key: config.ts_api_key,
+                key,
                 domain: config.ts_api_domain,
                 client: Arc::new(c),
                 local_api_addr: None,

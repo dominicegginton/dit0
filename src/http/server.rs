@@ -1,5 +1,5 @@
 use super::auth::require_user;
-use super::handlers::{user, user_otp_generate, user_otp_revoke, user_otp_set_password};
+use super::handlers::{credentials_reset, credentials_setup, user};
 use super::state::AppState;
 use crate::tailscale::UserClaims;
 use axum::{
@@ -10,9 +10,7 @@ use axum::{
 };
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
-use std::convert::Infallible;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
@@ -42,9 +40,8 @@ impl Server for HttpsServer {
 
         let protected_routes = Router::new()
             .route("/", get(user))
-            .route("/otp/generate", post(user_otp_generate))
-            .route("/otp/password", post(user_otp_set_password))
-            .route("/otp/revoke", post(user_otp_revoke))
+            .route("/credentials/setup", post(credentials_setup))
+            .route("/credentials/reset", post(credentials_reset))
             .route_layer(middleware::from_fn(require_user));
 
         let app = Router::new()
@@ -68,9 +65,16 @@ impl Server for HttpsServer {
                             .set_nonblocking(true)
                             .expect("Failed to set nonblocking on stream");
 
-                        let peer_addr = listener
-                            .get_remote_addr(stream.as_raw_fd())
-                            .expect("Failed to get peer address for incoming HTTPS connection");
+                        let peer_addr = match listener.get_remote_addr(stream.as_raw_fd()) {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to get peer address, skipping connection: {}",
+                                    e
+                                );
+                                continue;
+                            }
+                        };
 
                         let app = app.clone();
                         let tls_acceptor = tls_acceptor.clone();
@@ -164,30 +168,6 @@ impl Server for HttpsServer {
                                                         Vec::new()
                                                     };
 
-                                                    if let Ok(all_devices) = state.tailscale.list_devices().await {
-                                                        let ip_str = format!("{}", peer_addr);
-                                                        if let Some(device) = all_devices.iter().find(|d| d.addresses.contains(&ip_str) || d.allowed_ips.contains(&ip_str) || d.extra_ips.contains(&ip_str)) {
-                                                            let html = super::views::device_info_page(device, bindable, &reasons_vec, &format!("{}", peer_addr));
-                                                            let resp = match hyper::Response::builder()
-                                                                .status(200)
-                                                                .header("content-type", "text/html; charset=utf-8")
-                                                                .body(axum::body::Body::from(html))
-                                                            {
-                                                                Ok(r) => r,
-                                                                Err(e) => {
-                                                                    tracing::error!("Failed to build response: {}", e);
-                                                                    let resp = hyper::Response::builder()
-                                                                        .status(500)
-                                                                        .body(axum::body::Body::from("Internal error"))
-                                                                        .unwrap();
-
-                                                                    resp
-                                                                }
-                                                            };
-                                                            return Ok::<_, Infallible>(resp);
-                                                        }
-                                                    }
-                                                    // fallback: call the app as usual
                                                     app.call(req).await
                                                 }
                                             }
