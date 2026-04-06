@@ -109,9 +109,18 @@ impl crate::http::server::Server for LdapServer {
                             .set_nonblocking(true)
                             .expect("Failed to set nonblocking on tsnet stream");
 
-                        let peer_addr = listener
-                            .get_remote_addr(stream.as_raw_fd())
-                            .expect("Failed to get peer address for incoming LDAPS connection");
+                        let peer_addr = match listener.get_remote_addr(stream.as_raw_fd()) {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                error!(
+                                    "Failed to get peer address for incoming LDAPS connection: {}",
+                                    e
+                                );
+                                use std::net::Shutdown;
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            }
+                        };
 
                         let env = env_clone.clone();
                         let otp = otp_clone;

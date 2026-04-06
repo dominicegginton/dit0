@@ -22,7 +22,13 @@ rustPlatform.buildRustPackage rec {
   nativeBuildInputs = [ rustfmt gcc go pkg-config ];
   buildInputs = [ openssl openldap ];
 
+
   PKGS_CONFIG_PATH = "${openssl.dev}/lib/pkgconfig";
+
+  # TODO: fix by vendoring go modules - not completed
+  GOCACHE = "/tmp/go-build";
+  GOMODCACHE = "/tmp/go-mod";
+  GOFLAGS = "-mod=vendor";
 
   meta = {
     description = "A directory information tree for your TailNet.";

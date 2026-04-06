@@ -7,69 +7,60 @@
 let
   cfg = config.services.dit0;
 
-  # Build the jq expression for config generation.
-  # Non-secret values are baked in; secret paths reference
-  # $CREDENTIALS_DIRECTORY which is resolved at runtime.
-  genConfigScript = pkgs.writeShellScript "dit0-gen-config" ''
-    set -euo pipefail
-    ${pkgs.jq}/bin/jq -n \
-      --argjson ldap_port ${toString cfg.ldapPort} \
-      --argjson web_port ${toString cfg.webPort} \
-      --arg ts_api_base_url ${lib.escapeShellArg cfg.tailscale.apiBaseUrl} \
-      --arg ts_api_key_file "$CREDENTIALS_DIRECTORY/ts-api-key" \
-      --arg ts_id ${lib.escapeShellArg cfg.tailscale.domain} \
-      --arg base_dn ${lib.escapeShellArg cfg.baseDN} \
-      --arg ts_hostname ${lib.escapeShellArg cfg.tailscale.hostname} \
-      --arg otp_hmac_key_file "$CREDENTIALS_DIRECTORY/otp-hmac-key" \
-      --arg data_dir ${lib.escapeShellArg cfg.dataDir} \
-      ${lib.optionalString (cfg.tailscale.authKeyFile != null)
-        ''--arg ts_auth_key_file "$CREDENTIALS_DIRECTORY/ts-auth-key" \''} \
-      '{
-        ldap_port: $ldap_port,
-        web_port: $web_port,
-        ts_api_base_url: $ts_api_base_url,
-        ts_api_key_file: $ts_api_key_file,
-        ts_id: $ts_id,
-        base_dn: $base_dn,
-        ts_hostname: $ts_hostname,
-        otp_hmac_key_file: $otp_hmac_key_file,
-        data_dir: $data_dir${lib.optionalString (cfg.tailscale.authKeyFile != null)
-          ", ts_auth_key_file: $ts_auth_key_file"}
-      }' > "$RUNTIME_DIRECTORY/config.json"
-  '';
+  # Generate config.json at build time using lib.writeJSON.
+  configJson = lib.writeJSON "config.json" (
+    let
+      baseConfig = {
+        ldap_port = cfg.ldap_port;
+        web_port = cfg.web_port;
+        ts_api_base_url = cfg.ts_api_base_url;
+        ts_api_key_file = "$CREDENTIALS_DIRECTORY/ts-api-key";
+        ts_id = cfg.ts_id;
+        base_dn = cfg.base_dn;
+        ts_hostname = cfg.ts_hostname;
+        otp_hmac_key_file = "$CREDENTIALS_DIRECTORY/otp-hmac-key";
+        data_dir = cfg.data_dir;
+      };
+    in
+    if cfg.ts_auth_key_file != null then
+      baseConfig // { ts_auth_key_file = "$CREDENTIALS_DIRECTORY/ts-auth-key"; }
+    else
+      baseConfig
+  );
 in
 
 {
+
   options.services.dit0 = {
     enable = lib.mkEnableOption "dit0 — a directory information tree for your TailNet";
 
     package = lib.mkPackageOption pkgs "dit0" { };
 
-    ldapPort = lib.mkOption {
+    ldap_port = lib.mkOption {
       type = lib.types.port;
       default = 636;
       description = "Port for the LDAP server to listen on.";
     };
 
-    webPort = lib.mkOption {
+    web_port = lib.mkOption {
       type = lib.types.port;
       default = 443;
       description = "Port for the HTTPS web server to listen on.";
     };
 
-    baseDN = lib.mkOption {
+    base_dn = lib.mkOption {
       type = lib.types.str;
       example = "dc=example";
       description = "Base distinguished name for the LDAP directory.";
     };
 
-    dataDir = lib.mkOption {
+    data_dir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/dit0";
       description = "Directory for persistent data (LMDB database, Tailscale state).";
     };
 
-    otpHmacKeyFile = lib.mkOption {
+    otp_hmac_key_file = lib.mkOption {
       type = lib.types.path;
       description = ''
         Path to a file containing the OTP HMAC secret key.
@@ -79,42 +70,40 @@ in
       '';
     };
 
-    tailscale = {
-      apiBaseUrl = lib.mkOption {
-        type = lib.types.str;
-        default = "https://api.tailscale.com/api/v2";
-        description = "Base URL for the Tailscale API.";
-      };
+    ts_api_base_url = lib.mkOption {
+      type = lib.types.str;
+      default = "https://api.tailscale.com/api/v2";
+      description = "Base URL for the Tailscale API.";
+    };
 
-      apiKeyFile = lib.mkOption {
-        type = lib.types.path;
-        description = ''
-          Path to a file containing the Tailscale API key.
-          Loaded via systemd LoadCredential — only needs to be
-          readable by root.
-        '';
-      };
+    ts_api_key_file = lib.mkOption {
+      type = lib.types.path;
+      description = ''
+        Path to a file containing the Tailscale API key.
+        Loaded via systemd LoadCredential — only needs to be
+        readable by root.
+      '';
+    };
 
-      authKeyFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = ''
-          Optional path to a file containing a Tailscale auth key
-          for automatic node registration. Loaded via systemd
-          LoadCredential — only needs to be readable by root.
-        '';
-      };
+    ts_auth_key_file = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Optional path to a file containing a Tailscale auth key
+        for automatic node registration. Loaded via systemd
+        LoadCredential — only needs to be readable by root.
+      '';
+    };
 
-      domain = lib.mkOption {
-        type = lib.types.str;
-        description = "Tailscale tailnet domain (e.g. your tailnet name).";
-      };
+    ts_id = lib.mkOption {
+      type = lib.types.str;
+      description = "Tailscale tailnet domain (e.g. your tailnet name).";
+    };
 
-      hostname = lib.mkOption {
-        type = lib.types.str;
-        default = "dit0";
-        description = "Hostname to register on the tailnet.";
-      };
+    ts_hostname = lib.mkOption {
+      type = lib.types.str;
+      default = "dit0";
+      description = "Hostname to register on the tailnet.";
     };
   };
 

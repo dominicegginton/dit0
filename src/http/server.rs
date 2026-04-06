@@ -89,6 +89,8 @@ impl Server for HttpsServer {
                                     "Failed to get peer address, skipping connection: {}",
                                     e
                                 );
+                                use std::net::Shutdown;
+                                let _ = stream.shutdown(Shutdown::Both);
                                 continue;
                             }
                         };
@@ -98,8 +100,8 @@ impl Server for HttpsServer {
                         let state = state.clone();
 
                         handle.spawn(async move {
-                        let stream = tokio::net::TcpStream::from_std(stream)
-                            .expect("Failed to convert to tokio stream");
+                            let stream = tokio::net::TcpStream::from_std(stream)
+                              .expect("Failed to convert to tokio stream");
                             let tls_stream = tls_acceptor.accept(stream).await.expect("Failed to accept TLS connection");
 
                             let io = TokioIo::new(tls_stream);
