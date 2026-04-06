@@ -17,6 +17,7 @@ use qrcode::QrCode;
 use rand::Rng;
 use serde::Deserialize;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use v_htmlescape::escape;
 
 #[derive(Deserialize)]
@@ -195,6 +196,20 @@ pub async fn credentials_setup(
         return Html(layout("Error", "<h1>Password required</h1>")).into_response();
     }
 
+    // Password complexity: minimum 8 characters, at least one uppercase,
+    // one lowercase, and one digit.
+    if password_plain.len() < 8
+        || !password_plain.chars().any(|c| c.is_ascii_uppercase())
+        || !password_plain.chars().any(|c| c.is_ascii_lowercase())
+        || !password_plain.chars().any(|c| c.is_ascii_digit())
+    {
+        return Html(layout(
+            "Error",
+            "<h1>Password too weak</h1><p>Password must be at least 8 characters and include an uppercase letter, a lowercase letter, and a digit.</p>",
+        ))
+        .into_response();
+    }
+
     // Check if already configured
     if let Ok(txn) = state.env.begin_ro_txn() {
         if let Ok(bytes) = txn.get(state.otp_db, &dn.as_bytes()) {
@@ -292,25 +307,33 @@ pub async fn credentials_setup(
         String::new()
     };
 
-    Html(layout(
-        "Credentials Configured",
-        &format!(
-            r#"
-            <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
-                <h2>Credentials Configured</h2>
-                <p>Your password has been saved and a TOTP secret has been generated.</p>
-                <p>Scan this QR code in your authenticator app, or enter the secret manually:</p>
-                {}
-                <div style="background: var(--light-gray); padding: 1rem; font-family: monospace; font-size: 1rem; text-align: center; border: 1px solid var(--text); margin: 1rem 0;">{}</div>
-                <p>When logging in via LDAP, enter your password and 6-digit TOTP separated by <code>::</code></p>
-                <p>For example: <code>mypassword::123456</code></p>
-                <a href="/">Back to Profile</a>
-            </div>
-            "#,
-            qr_html, secret_b32
-        ),
-    ))
-    .into_response()
+    // Return with Cache-Control: no-store to prevent browsers/proxies caching
+    // the page that contains the plaintext TOTP secret.
+    (
+        [
+            ("Cache-Control", "no-store, no-cache, must-revalidate"),
+            ("Pragma", "no-cache"),
+        ],
+        Html(layout(
+            "Credentials Configured",
+            &format!(
+                r#"
+                <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
+                    <h2>Credentials Configured</h2>
+                    <p>Your password has been saved and a TOTP secret has been generated.</p>
+                    <p>Scan this QR code in your authenticator app, or enter the secret manually:</p>
+                    {}
+                    <div style="background: var(--light-gray); padding: 1rem; font-family: monospace; font-size: 1rem; text-align: center; border: 1px solid var(--text); margin: 1rem 0;">{}</div>
+                    <p>When logging in via LDAP, enter your password and 6-digit TOTP separated by <code>::</code></p>
+                    <p>For example: <code>mypassword::123456</code></p>
+                    <a href="/">Back to Profile</a>
+                </div>
+                "#,
+                qr_html, secret_b32
+            ),
+        )),
+    )
+        .into_response()
 }
 
 #[axum::debug_handler]

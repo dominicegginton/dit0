@@ -48,4 +48,3 @@ The server joins your tailnet and listens on LDAPS (636) and HTTPS (443). Users 
 ## Future Scope
 
 - Audit logging for bind and search operations
-- Full RFC 4512 compliance for schema-aware clients

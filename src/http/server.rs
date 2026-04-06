@@ -10,6 +10,7 @@ use axum::{
 };
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -19,7 +20,11 @@ use tower_http::trace::TraceLayer;
 
 pub trait Server {
     fn from_state(state: AppState) -> Self;
-    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()>;
+    fn spawn(
+        self,
+        handle: tokio::runtime::Handle,
+        certs: (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
+    ) -> anyhow::Result<()>;
 }
 
 pub struct HttpsServer {
@@ -30,10 +35,14 @@ impl Server for HttpsServer {
     fn from_state(state: AppState) -> Self {
         HttpsServer { state }
     }
-    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
+    fn spawn(
+        self,
+        handle: tokio::runtime::Handle,
+        certs: (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
+    ) -> anyhow::Result<()> {
         let tls_config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(self.state.certs.0.clone(), self.state.certs.1.clone_key())
+            .with_single_cert(certs.0, certs.1)
             .expect("Failed to create TLS config");
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));

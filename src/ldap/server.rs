@@ -69,10 +69,16 @@ impl crate::http::server::Server for LdapServer {
         Self { state }
     }
 
-    fn spawn(self, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
-        let cert_pair = self.state.certs.clone();
-        let cert_chain = cert_pair.0.clone();
-        let key = cert_pair.1.clone_key();
+    fn spawn(
+        self,
+        handle: tokio::runtime::Handle,
+        certs: (
+            Vec<rustls::pki_types::CertificateDer<'static>>,
+            rustls::pki_types::PrivateKeyDer<'static>,
+        ),
+    ) -> anyhow::Result<()> {
+        let cert_chain = certs.0;
+        let key = certs.1;
 
         let tls_config = ServerConfig::builder()
             .with_no_client_auth()

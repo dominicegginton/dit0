@@ -462,6 +462,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "deser-hjson"
+version = "2.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbc1498156ddf9adc2eb251c1697b3a0dea599c94fb8cf1313f986adcc70f6e"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,6 +504,7 @@ dependencies = [
  "base64 0.21.7",
  "bytes",
  "chrono",
+ "deser-hjson",
  "futures",
  "hex",
  "hmac",
@@ -520,6 +530,7 @@ dependencies = [
  "serde_urlencoded",
  "sha1",
  "sha2",
+ "subtle",
  "syslog-tracing",
  "tailscale-localapi",
  "thiserror",

@@ -5,6 +5,7 @@ use lmdb::{Database, Environment};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct State {
@@ -13,5 +14,5 @@ pub struct State {
     pub otp_db: Database,
     pub env: Arc<Environment>,
     pub ts_net: Arc<TsNet>,
-    pub certs: std::sync::Arc<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+    pub certs: Arc<RwLock<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>>,
 }

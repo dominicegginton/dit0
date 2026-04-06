@@ -1,4 +1,5 @@
 use crate::tailscale::Tailscale;
+use futures::future::join_all;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -57,19 +58,76 @@ pub async fn get_all_entries(
     base_dn: &str,
 ) -> HashMap<String, HashMap<String, Vec<String>>> {
     // Only return Tailscale users as LDAP entries, do not merge with LMDB
-    let ts_users = tailscale.list_users().await.unwrap_or_default();
+    let ts_users = tailscale.cached_list_users().await.unwrap_or_default();
 
     // Gather devices once so we can lookup a device for a given user and
     // call the LocalAPI `whois` to retrieve `cap_map` values (e.g. shell/home).
-    let ts_devices = tailscale.list_devices().await.unwrap_or_default();
+    let ts_devices = tailscale.cached_list_devices().await.unwrap_or_default();
     let mut devices_by_user: HashMap<String, Vec<_>> = HashMap::new();
-    for dev in ts_devices {
+    for dev in &ts_devices {
         devices_by_user
             .entry(dev.user.clone())
             .or_default()
-            .push(dev);
+            .push(dev.clone());
     }
+
+    // ── Pre-fetch all whois results in parallel ────────────────────────────
+    // Collect unique IPs from all device addresses.
+    let mut all_ips: Vec<IpAddr> = Vec::new();
+    for dev in &ts_devices {
+        if let Some(addr) = dev.addresses.first() {
+            let ip_str = addr.split('/').next().unwrap_or(addr);
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                all_ips.push(ip);
+            }
+        }
+    }
+    all_ips.sort();
+    all_ips.dedup();
+
+    let whois_futures: Vec<_> = all_ips
+        .iter()
+        .map(|ip| {
+            let ip = *ip;
+            let ts = tailscale.clone();
+            async move { (ip, ts.cached_whois(ip).await) }
+        })
+        .collect();
+    let whois_results = join_all(whois_futures).await;
+    let whois_map: HashMap<IpAddr, _> = whois_results
+        .into_iter()
+        .filter_map(|(ip, res)| res.ok().map(|v| (ip, v)))
+        .collect();
     let mut entries_map: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+
+    // ── Container OUs (needed for tree-browsing clients like ldp.exe) ───────
+    {
+        let people_dn = format!("ou=people,{}", base_dn);
+        let people = entries_map.entry(people_dn).or_default();
+        people.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "organizationalUnit".to_string()],
+        );
+        people.insert("ou".to_string(), vec!["people".to_string()]);
+        people.insert(
+            "description".to_string(),
+            vec!["Tailscale users".to_string()],
+        );
+    }
+    {
+        let groups_dn = format!("ou=groups,{}", base_dn);
+        let groups = entries_map.entry(groups_dn).or_default();
+        groups.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "organizationalUnit".to_string()],
+        );
+        groups.insert("ou".to_string(), vec!["groups".to_string()]);
+        groups.insert(
+            "description".to_string(),
+            vec!["Tailscale user private groups".to_string()],
+        );
+    }
+
     for user in ts_users {
         // split login name to get uid
         let uid_str = user
@@ -161,92 +219,80 @@ pub async fn get_all_entries(
                 if let Some(addr) = dev.addresses.first() {
                     let ip_str = addr.split('/').next().unwrap_or(addr);
                     if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                        if let Ok(whois_opt) = tailscale.whois(ip).await {
-                            if let Some(whois) = whois_opt {
-                                if let Some(cap_map) = whois.cap_map {
-                                    // First prefer values inside our app capability key
-                                    let app_key = "dominicegginton.dev/cap/tsdit000000000";
-                                    if let Some(app_val) = cap_map.get(app_key) {
-                                        // app_val may be an object or an array of objects
-                                        if let Some(obj) = app_val.as_object() {
+                        if let Some(Some(whois)) = whois_map.get(&ip) {
+                            if let Some(ref cap_map) = whois.cap_map {
+                                // First prefer values inside our app capability key
+                                let app_key = "dominicegginton.dev/cap/tsdit000000000";
+                                if let Some(app_val) = cap_map.get(app_key) {
+                                    // app_val may be an object or an array of objects
+                                    if let Some(obj) = app_val.as_object() {
+                                        if let Some(v) =
+                                            obj.get("loginShell").and_then(|x| x.as_str())
+                                        {
+                                            found_shell = Some(v.to_string());
+                                        }
+                                        if let Some(v) =
+                                            obj.get("homeDirectory").and_then(|x| x.as_str())
+                                        {
+                                            found_home = Some(v.to_string());
+                                        }
+                                    } else if let Some(arr) = app_val.as_array() {
+                                        if let Some(first) = arr.first().and_then(|x| x.as_object())
+                                        {
                                             if let Some(v) =
-                                                obj.get("loginShell").and_then(|x| x.as_str())
+                                                first.get("loginShell").and_then(|x| x.as_str())
                                             {
                                                 found_shell = Some(v.to_string());
                                             }
                                             if let Some(v) =
-                                                obj.get("homeDirectory").and_then(|x| x.as_str())
+                                                first.get("homeDirectory").and_then(|x| x.as_str())
                                             {
                                                 found_home = Some(v.to_string());
                                             }
-                                        } else if let Some(arr) = app_val.as_array() {
-                                            if let Some(first) =
-                                                arr.first().and_then(|x| x.as_object())
-                                            {
-                                                if let Some(v) =
-                                                    first.get("loginShell").and_then(|x| x.as_str())
-                                                {
-                                                    found_shell = Some(v.to_string());
-                                                }
-                                                if let Some(v) = first
-                                                    .get("homeDirectory")
-                                                    .and_then(|x| x.as_str())
-                                                {
-                                                    found_home = Some(v.to_string());
-                                                }
-                                            }
                                         }
+                                    }
 
-                                        // If both found inside app val, we can skip top-level checks
-                                        if found_shell.is_some() && found_home.is_some() {
-                                            // nothing
-                                        } else {
-                                            // fallthrough to check common top-level keys
-                                            for k in
-                                                ["loginShell", "login_shell", "shell", "unix_shell"]
-                                            {
-                                                if found_shell.is_none() {
-                                                    if let Some(v) =
-                                                        cap_map.get(k).and_then(|x| x.as_str())
-                                                    {
-                                                        found_shell = Some(v.to_string());
-                                                    }
-                                                }
-                                            }
-                                            for k in [
-                                                "homeDirectory",
-                                                "home_directory",
-                                                "homedir",
-                                                "home",
-                                            ] {
-                                                if found_home.is_none() {
-                                                    if let Some(v) =
-                                                        cap_map.get(k).and_then(|x| x.as_str())
-                                                    {
-                                                        found_home = Some(v.to_string());
-                                                    }
-                                                }
-                                            }
-                                        }
+                                    // If both found inside app val, we can skip top-level checks
+                                    if found_shell.is_some() && found_home.is_some() {
+                                        // nothing
                                     } else {
-                                        // no app key; check top-level keys
+                                        // fallthrough to check common top-level keys
                                         for k in
                                             ["loginShell", "login_shell", "shell", "unix_shell"]
                                         {
-                                            if let Some(v) = cap_map.get(k).and_then(|x| x.as_str())
-                                            {
-                                                found_shell = Some(v.to_string());
-                                                break;
+                                            if found_shell.is_none() {
+                                                if let Some(v) =
+                                                    cap_map.get(k).and_then(|x| x.as_str())
+                                                {
+                                                    found_shell = Some(v.to_string());
+                                                }
                                             }
                                         }
                                         for k in
                                             ["homeDirectory", "home_directory", "homedir", "home"]
                                         {
-                                            if let Some(v) = cap_map.get(k).and_then(|x| x.as_str())
-                                            {
-                                                found_home = Some(v.to_string());
-                                                break;
+                                            if found_home.is_none() {
+                                                if let Some(v) =
+                                                    cap_map.get(k).and_then(|x| x.as_str())
+                                                {
+                                                    found_home = Some(v.to_string());
+                                                }
                                             }
+                                        }
+                                    }
+                                } else {
+                                    // no app key; check top-level keys
+                                    for k in ["loginShell", "login_shell", "shell", "unix_shell"] {
+                                        if let Some(v) = cap_map.get(k).and_then(|x| x.as_str()) {
+                                            found_shell = Some(v.to_string());
+                                            break;
+                                        }
+                                    }
+                                    for k in ["homeDirectory", "home_directory", "homedir", "home"]
+                                    {
+                                        if let Some(v) = cap_map.get(k).and_then(|x| x.as_str()) {
+                                            found_home = Some(v.to_string());
+                                            break;
                                         }
                                     }
                                 }

@@ -5,6 +5,7 @@ use crate::tailscale::Tailscale;
 use base32;
 use hex;
 use hmac::{Hmac, Mac};
+use ldap3_proto::control::LdapControl;
 use ldap3_proto::proto::{
     LdapBindCred, LdapBindResponse, LdapExtendedResponse, LdapFilter, LdapMsg, LdapOp,
     LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
@@ -16,6 +17,137 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
+
+use super::schemas;
+
+// ── Shared ACL helpers ──────────────────────────────────────────────────────
+
+/// Extract group identifiers that a user belongs to from an ACL preview response.
+fn extract_user_groups(acl_preview: &serde_json::Value) -> std::collections::HashSet<String> {
+    let mut groups = std::collections::HashSet::new();
+    if let serde_json::Value::Object(map) = acl_preview {
+        if let Some(serde_json::Value::Array(matches_arr)) = map.get("matches") {
+            for m in matches_arr {
+                if let serde_json::Value::Object(mobj) = m {
+                    if let Some(serde_json::Value::Array(users)) = mobj.get("users") {
+                        for u in users {
+                            if let Some(s) = u.as_str() {
+                                groups.insert(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    groups
+}
+
+/// Check whether any matching grant has a cap with `allow_bind = true`.
+fn check_allow_bind(
+    policy: &serde_json::Value,
+    user_groups: &std::collections::HashSet<String>,
+) -> bool {
+    if let serde_json::Value::Object(policy_obj) = policy {
+        if let Some(serde_json::Value::Array(grants_arr)) = policy_obj.get("grants") {
+            for grant in grants_arr {
+                if let serde_json::Value::Object(grant_obj) = grant {
+                    if !grant_src_matches(grant_obj, user_groups) {
+                        continue;
+                    }
+                    if let Some(serde_json::Value::Object(app_obj)) = grant_obj.get("app") {
+                        for (_app_name, caps_val) in app_obj.iter() {
+                            if let serde_json::Value::Array(caps_arr) = caps_val {
+                                for cap in caps_arr {
+                                    if let serde_json::Value::Object(cap_obj) = cap {
+                                        if matches!(
+                                            cap_obj.get("allow_bind"),
+                                            Some(serde_json::Value::Bool(true))
+                                        ) {
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extract posix groups (name, gidNumber) from grants whose src matches the user.
+fn extract_posix_groups(
+    policy: &serde_json::Value,
+    user_groups: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let mut posix_groups = Vec::new();
+    if let serde_json::Value::Object(policy_obj) = policy {
+        if let Some(serde_json::Value::Array(grants_arr)) = policy_obj.get("grants") {
+            for grant in grants_arr {
+                if let serde_json::Value::Object(grant_obj) = grant {
+                    if !grant_src_matches(grant_obj, user_groups) {
+                        continue;
+                    }
+                    if let Some(serde_json::Value::Object(app_obj)) = grant_obj.get("app") {
+                        for (_app_name, caps_val) in app_obj.iter() {
+                            if let serde_json::Value::Array(caps_arr) = caps_val {
+                                for cap in caps_arr {
+                                    if let serde_json::Value::Object(cap_obj) = cap {
+                                        if let Some(serde_json::Value::Array(groups)) =
+                                            cap_obj.get("posix_groups")
+                                        {
+                                            for g in groups {
+                                                if let serde_json::Value::Object(group_obj) = g {
+                                                    let name = group_obj
+                                                        .get("name")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string();
+                                                    let gid = group_obj
+                                                        .get("gidNumber")
+                                                        .and_then(|v| v.as_i64())
+                                                        .map(|n| n.to_string())
+                                                        .unwrap_or_else(|| "0".to_string());
+                                                    if !name.is_empty() {
+                                                        posix_groups.push((name, gid));
+                                                    }
+                                                } else if let Some(gname) = g.as_str() {
+                                                    posix_groups
+                                                        .push((gname.to_string(), "0".to_string()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    posix_groups
+}
+
+/// Check if any src in a grant object matches the user's group set.
+fn grant_src_matches(
+    grant_obj: &serde_json::Map<String, serde_json::Value>,
+    user_groups: &std::collections::HashSet<String>,
+) -> bool {
+    if let Some(serde_json::Value::Array(src_arr)) = grant_obj.get("src") {
+        for src in src_arr {
+            if let Some(src_str) = src.as_str() {
+                if user_groups.contains(src_str) || src_str == "*" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 fn matches_filter(filter: &LdapFilter, attrs: &HashMap<String, Vec<String>>) -> bool {
     match filter {
@@ -143,7 +275,7 @@ async fn handle_bind(
             op: LdapOp::BindResponse(LdapBindResponse {
                 res: LdapResult {
                     code: LdapResultCode::Success,
-                    matcheddn: format!("cn={},ou=machines,{}", bind.dn, base_dn),
+                    matcheddn: "".to_string(),
                     message: "Anonymous bind successful".to_string(),
                     referral: vec![],
                 },
@@ -237,7 +369,12 @@ async fn handle_bind(
         };
 
         let acl_preview = match tailscale
-            .preview_acl("-", "user", &ts_login_name, policy.clone())
+            .preview_acl(
+                &config.ts_api_domain,
+                "user",
+                &ts_login_name,
+                policy.clone(),
+            )
             .await
         {
             Ok(json) => json,
@@ -258,72 +395,8 @@ async fn handle_bind(
             }
         };
 
-        // Determine if user can bind by matching preview groups to grants with allow_bind=true
-        let mut user_groups = std::collections::HashSet::new();
-        if let serde_json::Value::Object(map) = &acl_preview {
-            if let Some(matches_val) = map.get("matches") {
-                if let serde_json::Value::Array(matches_arr) = matches_val {
-                    for m in matches_arr {
-                        if let serde_json::Value::Object(mobj) = m {
-                            if let Some(serde_json::Value::Array(users)) = mobj.get("users") {
-                                for u in users {
-                                    if let Some(s) = u.as_str() {
-                                        user_groups.insert(s.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut can_bind = false;
-        if let serde_json::Value::Object(policy_obj) = &policy {
-            if let Some(grants) = policy_obj.get("grants") {
-                if let serde_json::Value::Array(grants_arr) = grants {
-                    'outer: for grant in grants_arr {
-                        if let serde_json::Value::Object(grant_obj) = grant {
-                            // Check src matches any user group
-                            if let Some(srcs) = grant_obj.get("src") {
-                                if let serde_json::Value::Array(src_arr) = srcs {
-                                    for src in src_arr {
-                                        if let Some(src_str) = src.as_str() {
-                                            if user_groups.contains(src_str) || src_str == "*" {
-                                                // Check for app with allow_bind=true
-                                                if let Some(apps) = grant_obj.get("app") {
-                                                    if let serde_json::Value::Object(app_obj) = apps
-                                                    {
-                                                        for (_app_name, caps_val) in app_obj.iter()
-                                                        {
-                                                            if let serde_json::Value::Array(
-                                                                caps_arr,
-                                                            ) = caps_val
-                                                            {
-                                                                for cap in caps_arr {
-                                                                    if let serde_json::Value::Object(cap_obj) = cap {
-                                                                        if let Some(serde_json::Value::Bool(true)) = cap_obj.get("allow_bind") {
-                                                                            can_bind = true;
-                                                                            break 'outer;
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if !can_bind {
+        let user_groups = extract_user_groups(&acl_preview);
+        if !check_allow_bind(&policy, &user_groups) {
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
@@ -550,13 +623,70 @@ async fn handle_bind(
 
 async fn handle_search(
     tailscale: &Tailscale,
+    config: &Config,
     msgid: i32,
     base_dn: &str,
     search: ldap3_proto::proto::LdapSearchRequest,
+    req_controls: &[LdapControl],
 ) -> Vec<LdapMsg> {
-    // RootDSE: base scope search on empty DN
+    // ── Subschema Subentry (RFC 4512 §4.2) ──────────────────────────────────
+    // Match base-scope queries on "cn=Subschema" (case-insensitive).
+    if matches!(search.scope, LdapSearchScope::Base)
+        && search.base.eq_ignore_ascii_case("cn=Subschema")
+    {
+        let attrs = schemas::filter_subschema_attributes(&search.attrs);
+        return vec![
+            LdapMsg {
+                msgid,
+                op: LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                    dn: "cn=Subschema".to_string(),
+                    attributes: attrs,
+                }),
+                ctrl: vec![],
+            },
+            LdapMsg {
+                msgid,
+                op: LdapOp::SearchResultDone(LdapResult {
+                    code: LdapResultCode::Success,
+                    matcheddn: "".to_string(),
+                    message: "".to_string(),
+                    referral: vec![],
+                }),
+                ctrl: vec![],
+            },
+        ];
+    }
+
+    // ── Reject searches outside the base DN subtree (RFC 4511 §4.5.1) ────
+    // Subschema and RootDSE are handled above; everything else must be
+    // the base_dn itself or fall beneath it.  Return NoSuchObject so
+    // Windows clients don't hang waiting for referrals.
+    if !search.base.is_empty()
+        && !search.base.eq_ignore_ascii_case(base_dn)
+        && !search
+            .base
+            .to_ascii_lowercase()
+            .ends_with(&format!(",{}", base_dn.to_ascii_lowercase()))
+    {
+        return vec![LdapMsg {
+            msgid,
+            op: LdapOp::SearchResultDone(LdapResult {
+                code: LdapResultCode::NoSuchObject,
+                matcheddn: base_dn.to_string(),
+                message: "Object not found within this naming context".to_string(),
+                referral: vec![],
+            }),
+            ctrl: vec![],
+        }];
+    }
+
+    // ── RootDSE (RFC 4512 §5.1) ────────────────────────────────────────────
     if search.base.is_empty() && matches!(search.scope, LdapSearchScope::Base) {
         let attrs = vec![
+            LdapPartialAttribute {
+                atype: "objectClass".to_string(),
+                vals: vec![b"top".to_vec()],
+            },
             LdapPartialAttribute {
                 atype: "namingContexts".to_string(),
                 vals: vec![base_dn.as_bytes().to_vec()],
@@ -574,12 +704,30 @@ async fn handle_search(
                 vals: vec![b"1.3.6.1.4.1.1466.20037".to_vec()], // StartTLS
             },
             LdapPartialAttribute {
+                atype: "supportedControl".to_string(),
+                vals: vec![b"1.2.840.113556.1.4.319".to_vec()], // Simple Paged Results (RFC 2696)
+            },
+            LdapPartialAttribute {
+                atype: "supportedFeatures".to_string(),
+                vals: vec![
+                    b"1.3.6.1.4.1.4203.1.5.1".to_vec(), // All Operational Attributes
+                ],
+            },
+            LdapPartialAttribute {
                 atype: "subschemaSubentry".to_string(),
                 vals: vec![b"cn=Subschema".to_vec()],
             },
             LdapPartialAttribute {
                 atype: "vendorName".to_string(),
                 vals: vec![b"dit0".to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "defaultNamingContext".to_string(),
+                vals: vec![base_dn.as_bytes().to_vec()],
+            },
+            LdapPartialAttribute {
+                atype: "vendorVersion".to_string(),
+                vals: vec![b"1.0.0".to_vec()],
             },
         ];
 
@@ -670,91 +818,20 @@ async fn handle_search(
 
             // Get the ACL preview for the user
             let acl_preview = match tailscale
-                .preview_acl("-", "user", &ts_login_name, policy.clone())
+                .preview_acl(
+                    &config.ts_api_domain,
+                    "user",
+                    &ts_login_name,
+                    policy.clone(),
+                )
                 .await
             {
                 Ok(json) => json,
                 Err(_) => serde_json::Value::Null,
             };
 
-            // Determine user groups from preview
-            let mut user_groups = std::collections::HashSet::new();
-            if let serde_json::Value::Object(map) = &acl_preview {
-                if let Some(matches_val) = map.get("matches") {
-                    if let serde_json::Value::Array(matches_arr) = matches_val {
-                        for m in matches_arr {
-                            if let serde_json::Value::Object(mobj) = m {
-                                if let Some(serde_json::Value::Array(users)) = mobj.get("users") {
-                                    for u in users {
-                                        if let Some(s) = u.as_str() {
-                                            user_groups.insert(s.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Extract posix_groups from matching grants/caps in the ACL policy for this user
-            // Now expects posix_groups to be an array of objects: { name: ..., gidNumber: ... }
-            let mut posix_groups: Vec<(String, String)> = Vec::new();
-            if let serde_json::Value::Object(policy_obj) = &policy {
-                if let Some(grants) = policy_obj.get("grants") {
-                    if let serde_json::Value::Array(grants_arr) = grants {
-                        for grant in grants_arr {
-                            if let serde_json::Value::Object(grant_obj) = grant {
-                                // Check src matches any user group
-                                if let Some(srcs) = grant_obj.get("src") {
-                                    if let serde_json::Value::Array(src_arr) = srcs {
-                                        for src in src_arr {
-                                            if let Some(src_str) = src.as_str() {
-                                                if user_groups.contains(src_str) || src_str == "*" {
-                                                    // Check for app with posix_groups
-                                                    if let Some(apps) = grant_obj.get("app") {
-                                                        if let serde_json::Value::Object(app_obj) =
-                                                            apps
-                                                        {
-                                                            for (_app_name, caps_val) in
-                                                                app_obj.iter()
-                                                            {
-                                                                if let serde_json::Value::Array(
-                                                                    caps_arr,
-                                                                ) = caps_val
-                                                                {
-                                                                    for cap in caps_arr {
-                                                                        if let serde_json::Value::Object(cap_obj) = cap {
-                                                                            if let Some(serde_json::Value::Array(groups)) = cap_obj.get("posix_groups") {
-                                                                                for g in groups {
-                                                                                    if let serde_json::Value::Object(group_obj) = g {
-                                                                                        let name = group_obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                                                                        let gid = group_obj.get("gidNumber").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "0".to_string());
-                                                                                        if !name.is_empty() {
-                                                                                            posix_groups.push((name, gid));
-                                                                                        }
-                                                                                    } else if let Some(gname) = g.as_str() {
-                                                                                        // Backward compatibility: if still string, use default gid
-                                                                                        posix_groups.push((gname.to_string(), "0".to_string()));
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let user_groups = extract_user_groups(&acl_preview);
+            let posix_groups = extract_posix_groups(&policy, &user_groups);
 
             // For each posix group, emit a posixGroup entry with memberUid=username and gidNumber
             for (group, gid_number) in posix_groups {
@@ -826,7 +903,62 @@ async fn handle_search(
         }
     }
 
-    entries.push(LdapMsg {
+    // ── RFC 2696 Simple Paged Results ──────────────────────────────────────
+    // If the client sent a SimplePagedResults control, page the result set.
+    let paging = req_controls.iter().find_map(|c| match c {
+        LdapControl::SimplePagedResults { size, cookie } => Some((*size, cookie.clone())),
+        _ => None,
+    });
+
+    let (result_entries, done_ctrl) = if let Some((page_size, cookie)) = paging {
+        let page_size = if page_size <= 0 {
+            entries.len()
+        } else {
+            page_size as usize
+        };
+
+        // Cookie encodes the offset as a big-endian u32.  Empty cookie = start.
+        let cookie: &Vec<u8> = &cookie;
+        let offset: usize = if cookie.is_empty() {
+            0
+        } else if cookie.len() == 4 {
+            u32::from_be_bytes([cookie[0], cookie[1], cookie[2], cookie[3]]) as usize
+        } else {
+            0usize
+        };
+
+        let total = entries.len();
+        let end = std::cmp::min(offset + page_size, total);
+        let page: Vec<LdapMsg> = entries.into_iter().skip(offset).take(page_size).collect();
+
+        // Return cookie = empty when we've sent all results; otherwise encode
+        // the next offset.
+        let next_cookie = if end >= total {
+            vec![]
+        } else {
+            (end as u32).to_be_bytes().to_vec()
+        };
+
+        let remaining = if end >= total {
+            0i64
+        } else {
+            (total - end) as i64
+        };
+
+        (
+            page,
+            vec![LdapControl::SimplePagedResults {
+                size: remaining,
+                cookie: next_cookie,
+            }],
+        )
+    } else {
+        (entries, vec![])
+    };
+
+    let mut result: Vec<LdapMsg> = result_entries;
+
+    result.push(LdapMsg {
         msgid,
         op: LdapOp::SearchResultDone(LdapResult {
             code: LdapResultCode::Success,
@@ -834,10 +966,10 @@ async fn handle_search(
             message: "".to_string(),
             referral: vec![],
         }),
-        ctrl: vec![],
+        ctrl: done_ctrl,
     });
 
-    entries
+    result
 }
 
 pub async fn handle_request(
@@ -873,7 +1005,9 @@ pub async fn handle_request(
             )
             .await
         }
-        LdapOp::SearchRequest(search) => handle_search(tailscale, msgid, base_dn, search).await,
+        LdapOp::SearchRequest(search) => {
+            handle_search(tailscale, config, msgid, base_dn, search, &req.ctrl).await
+        }
         LdapOp::CompareRequest(_) => {
             vec![LdapMsg {
                 msgid,

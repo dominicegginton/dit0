@@ -4,7 +4,21 @@ use reqwest::{header, Client, Method, Request, StatusCode, Url};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
+use std::net::IpAddr;
+use std::time::Instant;
 use std::{collections::HashMap, error, fmt, sync::Arc};
+use tokio::sync::RwLock;
+
+/// Default cache TTL: 60 seconds.
+const CACHE_TTL_SECS: u64 = 60;
+
+/// Internal cache holding the last successful API responses with timestamps.
+#[derive(Debug, Default)]
+struct TsApiCache {
+    users: Option<(Instant, Vec<User>)>,
+    devices: Option<(Instant, Vec<Device>)>,
+    whois: HashMap<IpAddr, (Instant, Option<LocalWhoIsResponse>)>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Tailscale {
@@ -14,6 +28,7 @@ pub struct Tailscale {
     client: Arc<Client>,
     local_api_addr: Option<String>,
     local_api_cred: Option<String>,
+    cache: Arc<RwLock<TsApiCache>>,
 }
 
 impl Tailscale {
@@ -28,6 +43,7 @@ impl Tailscale {
                 client: Arc::new(c),
                 local_api_addr: None,
                 local_api_cred: None,
+                cache: Arc::new(RwLock::new(TsApiCache::default())),
             },
             Err(e) => panic!("creating client failed: {:?}", e),
         }
@@ -134,19 +150,26 @@ impl Tailscale {
             (),
             None,
         );
-        let resp = self.client.execute(request).await.unwrap();
+        let resp = self.client.execute(request).await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("HTTP request failed: {}", e),
+        })?;
 
         match resp.status() {
             StatusCode::OK => (),
             s => {
+                let body = resp.text().await.unwrap_or_default();
                 return Err(APIError {
                     status_code: s,
-                    body: resp.text().await.unwrap(),
-                })
+                    body,
+                });
             }
         };
 
-        let r: UsersResponse = resp.json().await.unwrap();
+        let r: UsersResponse = resp.json().await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("Failed to parse users response: {}", e),
+        })?;
         Ok(r.users)
     }
 
@@ -177,19 +200,26 @@ impl Tailscale {
             query,
         );
 
-        let resp = self.client.execute(request).await.unwrap();
+        let resp = self.client.execute(request).await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("HTTP request failed: {}", e),
+        })?;
 
         match resp.status() {
             StatusCode::OK => (),
             s => {
+                let body = resp.text().await.unwrap_or_default();
                 return Err(APIError {
                     status_code: s,
-                    body: resp.text().await.unwrap(),
-                })
+                    body,
+                });
             }
         };
 
-        let r: APIResponse = resp.json().await.unwrap();
+        let r: APIResponse = resp.json().await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("Failed to parse devices response: {}", e),
+        })?;
         Ok(r)
     }
 
@@ -245,19 +275,26 @@ impl Tailscale {
             query,
         );
 
-        let resp = self.client.execute(request).await.unwrap();
+        let resp = self.client.execute(request).await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("HTTP request failed: {}", e),
+        })?;
 
         match resp.status() {
             StatusCode::OK => (),
             s => {
+                let body = resp.text().await.unwrap_or_default();
                 return Err(APIError {
                     status_code: s,
-                    body: resp.text().await.unwrap(),
-                })
+                    body,
+                });
             }
         };
 
-        let json: serde_json::Value = resp.json().await.unwrap();
+        let json: serde_json::Value = resp.json().await.map_err(|e| APIError {
+            status_code: StatusCode::BAD_GATEWAY,
+            body: format!("Failed to parse ACL preview response: {}", e),
+        })?;
         Ok(json)
     }
 
@@ -362,6 +399,65 @@ impl Tailscale {
                 body: format!("LocalAPI request failed: {}", e),
             }),
         }
+    }
+
+    // ── Cached wrappers ─────────────────────────────────────────────────
+
+    /// Return users, serving from a short-lived in-memory cache when fresh.
+    pub async fn cached_list_users(&self) -> Result<Vec<User>, APIError> {
+        let ttl = std::time::Duration::from_secs(CACHE_TTL_SECS);
+        {
+            let cache = self.cache.read().await;
+            if let Some((ts, ref users)) = cache.users {
+                if ts.elapsed() < ttl {
+                    return Ok(users.clone());
+                }
+            }
+        }
+        let users = self.list_users().await?;
+        {
+            let mut cache = self.cache.write().await;
+            cache.users = Some((Instant::now(), users.clone()));
+        }
+        Ok(users)
+    }
+
+    /// Return devices, serving from a short-lived in-memory cache when fresh.
+    pub async fn cached_list_devices(&self) -> Result<Vec<Device>, APIError> {
+        let ttl = std::time::Duration::from_secs(CACHE_TTL_SECS);
+        {
+            let cache = self.cache.read().await;
+            if let Some((ts, ref devices)) = cache.devices {
+                if ts.elapsed() < ttl {
+                    return Ok(devices.clone());
+                }
+            }
+        }
+        let devices = self.list_devices().await?;
+        {
+            let mut cache = self.cache.write().await;
+            cache.devices = Some((Instant::now(), devices.clone()));
+        }
+        Ok(devices)
+    }
+
+    /// Return whois result for an IP, serving from cache when fresh.
+    pub async fn cached_whois(&self, ip: IpAddr) -> Result<Option<LocalWhoIsResponse>, APIError> {
+        let ttl = std::time::Duration::from_secs(CACHE_TTL_SECS);
+        {
+            let cache = self.cache.read().await;
+            if let Some((ts, ref val)) = cache.whois.get(&ip) {
+                if ts.elapsed() < ttl {
+                    return Ok(val.clone());
+                }
+            }
+        }
+        let result = self.whois(ip).await?;
+        {
+            let mut cache = self.cache.write().await;
+            cache.whois.insert(ip, (Instant::now(), result.clone()));
+        }
+        Ok(result)
     }
 
     /// Get the status of the local node.
