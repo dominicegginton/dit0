@@ -31,8 +31,16 @@ pub async fn admin_dashboard(
     let base_dn = &state.config.base_dn;
 
     // Fetch data in parallel-ish (cached so fast)
-    let ts_users = state.tailscale.cached_list_users().await.unwrap_or_default();
-    let ts_devices = state.tailscale.cached_list_devices().await.unwrap_or_default();
+    let ts_users = state
+        .tailscale
+        .cached_list_users()
+        .await
+        .unwrap_or_default();
+    let ts_devices = state
+        .tailscale
+        .cached_list_devices()
+        .await
+        .unwrap_or_default();
     let entries = objects::get_all_entries(&state.tailscale, base_dn).await;
 
     let total_users = ts_users.len();
@@ -72,7 +80,9 @@ pub async fn admin_dashboard(
             txn.get(state.otp_db, &dn.as_bytes())
                 .ok()
                 .and_then(|b| serde_json::from_slice::<objects::OtpData>(b).ok())
-                .map_or(false, |o| o.password_hmac.is_some() && o.totp_secret.is_some())
+                .map_or(false, |o| {
+                    o.password_hmac.is_some() && o.totp_secret.is_some()
+                })
         });
         let otp_badge = if has_otp {
             "<span style=\"color:green;\">\u{2713}</span>"
@@ -112,8 +122,11 @@ pub async fn admin_dashboard(
             "<span style=\"color:red;\">\u{2717}</span>"
         };
         let last_seen = d.last_seen.format("%Y-%m-%d %H:%M").to_string();
+        let first_ip = d.addresses.first().map(|a| a.as_str()).unwrap_or(&d.id);
+        let ts_device_url = format!("https://login.tailscale.com/admin/machines/{}", first_ip);
         devices_rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td><a href=\"{}\" target=\"_blank\">{}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            ts_device_url,
             escape(&hostname),
             escape(&addrs),
             escape(&d.os),
@@ -146,7 +159,10 @@ pub async fn admin_dashboard(
                 <tr><td>ou=machines</td><td>{}</td></tr>
             </tbody>
         </table>"#,
-        escape(base_dn), people_count, groups_count, machines_count
+        escape(base_dn),
+        people_count,
+        groups_count,
+        machines_count
     );
 
     let body = format!(
@@ -645,9 +661,7 @@ pub async fn admin_dashboard(
 }
 
 /// JSON API: return all audit events so D3 charts can fetch data.
-pub async fn admin_audit_api(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn admin_audit_api(State(state): State<AppState>) -> impl IntoResponse {
     let events = state.audit_log.snapshot().await;
     Json(events).into_response()
 }

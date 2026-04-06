@@ -371,12 +371,7 @@ async fn handle_bind(
         };
 
         let acl_preview = match tailscale
-            .preview_acl(
-                &config.ts_api_domain,
-                "user",
-                &ts_login_name,
-                policy.clone(),
-            )
+            .preview_acl(&config.ts_id, "user", &ts_login_name, policy.clone())
             .await
         {
             Ok(json) => json,
@@ -847,12 +842,7 @@ async fn handle_search(
 
             // Get the ACL preview for the user
             let acl_preview = match tailscale
-                .preview_acl(
-                    &config.ts_api_domain,
-                    "user",
-                    &ts_login_name,
-                    policy.clone(),
-                )
+                .preview_acl(&config.ts_id, "user", &ts_login_name, policy.clone())
                 .await
             {
                 Ok(json) => json,

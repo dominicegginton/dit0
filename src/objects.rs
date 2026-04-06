@@ -423,14 +423,12 @@ pub async fn get_all_entries(
                                 let app_key = "dominicegginton.dev/cap/tsdit0";
                                 if let Some(app_val) = cap_map.get(app_key) {
                                     // Resolve to a single JSON object (first element if array).
-                                    let obj = app_val
-                                        .as_object()
-                                        .or_else(|| {
-                                            app_val
-                                                .as_array()
-                                                .and_then(|a| a.first())
-                                                .and_then(|v| v.as_object())
-                                        });
+                                    let obj = app_val.as_object().or_else(|| {
+                                        app_val
+                                            .as_array()
+                                            .and_then(|a| a.first())
+                                            .and_then(|v| v.as_object())
+                                    });
                                     if let Some(obj) = obj {
                                         for (k, v) in obj {
                                             if let Some(s) = v.as_str() {
@@ -459,9 +457,9 @@ pub async fn get_all_entries(
             .entry("homeDirectory".to_string())
             .or_insert_with(|| vec![format!("/home/{}", uid)]);
 
-        attrs.entry("loginShell".to_string()).or_insert_with(|| {
-            vec!["/run/current-system/sw/bin/bash".to_string()]
-        });
+        attrs
+            .entry("loginShell".to_string())
+            .or_insert_with(|| vec!["/run/current-system/sw/bin/bash".to_string()]);
 
         // Gecso field is good practice for legacy systems
         attrs

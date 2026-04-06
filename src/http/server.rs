@@ -1,5 +1,7 @@
 use super::auth::{require_allow_admin_ui, require_user};
-use super::handlers::{admin_audit_api, admin_dashboard, credentials_reset, credentials_setup, user};
+use super::handlers::{
+    admin_audit_api, admin_dashboard, credentials_reset, credentials_setup, user,
+};
 use super::state::AppState;
 use crate::tailscale::UserClaims;
 use axum::{

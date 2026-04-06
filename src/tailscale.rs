@@ -39,7 +39,7 @@ impl Tailscale {
             Ok(c) => Self {
                 base_url: config.ts_api_base_url,
                 key,
-                domain: config.ts_api_domain,
+                domain: config.ts_id,
                 client: Arc::new(c),
                 local_api_addr: None,
                 local_api_cred: None,

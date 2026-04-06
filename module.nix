@@ -17,7 +17,7 @@ let
       --argjson web_port ${toString cfg.webPort} \
       --arg ts_api_base_url ${lib.escapeShellArg cfg.tailscale.apiBaseUrl} \
       --arg ts_api_key_file "$CREDENTIALS_DIRECTORY/ts-api-key" \
-      --arg ts_api_domain ${lib.escapeShellArg cfg.tailscale.domain} \
+      --arg ts_id ${lib.escapeShellArg cfg.tailscale.domain} \
       --arg base_dn ${lib.escapeShellArg cfg.baseDN} \
       --arg ts_hostname ${lib.escapeShellArg cfg.tailscale.hostname} \
       --arg otp_hmac_key_file "$CREDENTIALS_DIRECTORY/otp-hmac-key" \
@@ -29,7 +29,7 @@ let
         web_port: $web_port,
         ts_api_base_url: $ts_api_base_url,
         ts_api_key_file: $ts_api_key_file,
-        ts_api_domain: $ts_api_domain,
+        ts_id: $ts_id,
         base_dn: $base_dn,
         ts_hostname: $ts_hostname,
         otp_hmac_key_file: $otp_hmac_key_file,

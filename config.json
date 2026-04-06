@@ -3,7 +3,7 @@
   "web_port": 443,
   "ts_api_base_url": "https://api.tailscale.com/api/v2",
   "ts_api_key_file": "./ts_api_key",
-  "ts_api_domain": "T2YHuJgy2121CNTRL",
+  "ts_id": "T2YHuJgy2121CNTRL",
   "base_dn": "dc=T2YHuJgy2121CNTRL",
   "ts_hostname": "dit0",
   "otp_hmac_key_file": "./otp_hmac_key",

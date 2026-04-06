@@ -9,7 +9,7 @@ pub struct Config {
     pub web_port: u16,
     pub ts_api_base_url: String,
     pub ts_api_key_file: String,
-    pub ts_api_domain: String,
+    pub ts_id: String,
     pub base_dn: String,
     pub ts_hostname: String,
     pub ts_auth_key_file: Option<String>,

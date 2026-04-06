@@ -22,7 +22,7 @@ Set `CONFIG_FILE` environment variable (defaults to `config.json`):
   "web_port": 443,
   "ts_api_base_url": "https://api.tailscale.com/api/v2",
   "ts_api_key_file": "/run/secrets/ts_api_key",
-  "ts_api_domain": "example.com",
+  "ts_id": "TSK98a...",
   "base_dn": "dc=example,dc=com",
   "ts_hostname": "dit0",
   "ts_auth_key_file": "/run/secrets/ts_auth_key",
@@ -131,3 +131,81 @@ CONFIG_FILE=config.json ./target/release/dit0
 ```
 
 The server joins your tailnet and listens on LDAPS (636) and HTTPS (443). Users access the web UI to set up their password and TOTP, then authenticate to LDAP-bound devices with `password::totp_code`.
+
+## NixOS
+
+dit0 provides a Nix flake with a NixOS module for declarative deployment.
+
+### Flake input
+
+```nix
+{
+  inputs.dit0.url = "github:dominicegginton/dit0";
+}
+```
+
+### NixOS module
+
+Add the module to your NixOS configuration and enable the service:
+
+```nix
+{ inputs, ... }:
+
+{
+  imports = [ inputs.dit0.nixosModules.default ];
+
+  services.dit0 = {
+    enable = true;
+    package = inputs.dit0.packages.${pkgs.system}.default;
+
+    baseDN = "dc=example";
+    ldapPort = 636;
+    webPort = 443;
+    dataDir = "/var/lib/dit0";
+    otpHmacKeyFile = "/run/secrets/otp-hmac-key";
+
+    tailscale = {
+      domain = "your-tailnet-name";
+      hostname = "dit0";
+      apiKeyFile = "/run/secrets/ts-api-key";
+      # Optional — for automatic node registration:
+      # authKeyFile = "/run/secrets/ts-auth-key";
+    };
+  };
+}
+```
+
+### Module options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable` | `bool` | `false` | Enable the dit0 service |
+| `package` | `package` | `pkgs.dit0` | The dit0 package to use |
+| `ldapPort` | `port` | `636` | LDAP server listen port |
+| `webPort` | `port` | `443` | HTTPS web server listen port |
+| `baseDN` | `string` | — | Base distinguished name for the LDAP directory |
+| `dataDir` | `path` | `/var/lib/dit0` | Persistent data directory (LMDB, Tailscale state) |
+| `otpHmacKeyFile` | `path` | — | Path to OTP HMAC secret key file |
+| `tailscale.apiBaseUrl` | `string` | `https://api.tailscale.com/api/v2` | Tailscale API base URL |
+| `tailscale.apiKeyFile` | `path` | — | Path to Tailscale API key file |
+| `tailscale.authKeyFile` | `path?` | `null` | Optional Tailscale auth key for auto-registration |
+| `tailscale.domain` | `string` | — | Tailnet domain / name |
+| `tailscale.hostname` | `string` | `dit0` | Hostname to register on the tailnet |
+
+### Secrets management
+
+Secret files are loaded via systemd `LoadCredential` — they only need to be readable by root and never appear in the Nix store.
+
+### Systemd hardening
+
+The NixOS module runs dit0 as a dedicated `dit0` system user with comprehensive systemd sandboxing including `ProtectSystem=strict`, `PrivateTmp`, `MemoryDenyWriteExecute`, restricted system calls, and only the network capabilities required for Tailscale (`CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_NET_ADMIN`).
+
+### Building with Nix
+
+```sh
+# Build the package
+nix build
+
+# Enter a development shell
+nix develop
+```
