@@ -128,6 +128,201 @@ pub async fn get_all_entries(
         );
     }
 
+    // ── ou=machines container OU ────────────────────────────────────────────
+    {
+        let machines_dn = format!("ou=machines,{}", base_dn);
+        let machines = entries_map.entry(machines_dn).or_default();
+        machines.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "organizationalUnit".to_string()],
+        );
+        machines.insert("ou".to_string(), vec!["machines".to_string()]);
+        machines.insert(
+            "description".to_string(),
+            vec!["Tailscale devices".to_string()],
+        );
+    }
+
+    // ── Device entries under ou=machines ─────────────────────────────────────
+    for dev in &ts_devices {
+        // Use the sanitised hostname as the cn; fall back to the Tailscale
+        // name field (FQDN-like) stripped of the trailing dot.
+        let raw_cn = if !dev.hostname.is_empty() {
+            dev.hostname.clone()
+        } else {
+            dev.name.trim_end_matches('.').to_string()
+        };
+        if raw_cn.is_empty() {
+            continue;
+        }
+        let cn = raw_cn.to_lowercase();
+
+        let dn = format!("cn={},ou=machines,{}", cn, base_dn);
+        let attrs = entries_map.entry(dn).or_default();
+
+        attrs.insert(
+            "objectClass".to_string(),
+            vec![
+                "top".to_string(),
+                "device".to_string(),
+                "ipHost".to_string(),
+                "tailscaleObject".to_string(),
+            ],
+        );
+        attrs.insert("cn".to_string(), vec![cn.clone()]);
+
+        // ipHostNumber – all addresses (required by ipHost)
+        let ip_addrs: Vec<String> = dev
+            .addresses
+            .iter()
+            .map(|a| a.split('/').next().unwrap_or(a).to_string())
+            .collect();
+        if !ip_addrs.is_empty() {
+            attrs.insert("ipHostNumber".to_string(), ip_addrs.clone());
+        }
+
+        // description
+        attrs.insert(
+            "description".to_string(),
+            vec![format!(
+                "Tailscale device {} ({})",
+                dev.name.trim_end_matches('.'),
+                dev.os
+            )],
+        );
+
+        // ou (optional on device)
+        attrs.insert("ou".to_string(), vec!["machines".to_string()]);
+
+        // ── Tailscale custom attributes ──
+        if !dev.id.is_empty() {
+            attrs.insert("tsId".to_string(), vec![dev.id.clone()]);
+        }
+        if !dev.name.is_empty() {
+            attrs.insert("tsName".to_string(), vec![dev.name.clone()]);
+        }
+        if !dev.hostname.is_empty() {
+            attrs.insert("tsHostname".to_string(), vec![dev.hostname.clone()]);
+        }
+        if !dev.os.is_empty() {
+            attrs.insert("tsOs".to_string(), vec![dev.os.clone()]);
+        }
+        if !dev.client_version.is_empty() {
+            attrs.insert(
+                "tsClientVersion".to_string(),
+                vec![dev.client_version.clone()],
+            );
+        }
+        if !dev.derp.is_empty() {
+            attrs.insert("tsDerp".to_string(), vec![dev.derp.clone()]);
+        }
+        if !dev.machine_key.is_empty() {
+            attrs.insert("tsMachineKey".to_string(), vec![dev.machine_key.clone()]);
+        }
+        if !dev.node_key.is_empty() {
+            attrs.insert("tsNodeKey".to_string(), vec![dev.node_key.clone()]);
+        }
+        if !dev.user.is_empty() {
+            attrs.insert("tsLoginName".to_string(), vec![dev.user.clone()]);
+        }
+
+        // Addresses / IPs
+        for addr in &dev.addresses {
+            attrs
+                .entry("tsAddress".to_string())
+                .or_default()
+                .push(addr.clone());
+        }
+        for ip in &dev.allowed_ips {
+            attrs
+                .entry("tsAllowedIp".to_string())
+                .or_default()
+                .push(ip.clone());
+        }
+        for ip in &dev.extra_ips {
+            attrs
+                .entry("tsExtraIp".to_string())
+                .or_default()
+                .push(ip.clone());
+        }
+        for ep in &dev.endpoints {
+            attrs
+                .entry("tsEndpoint".to_string())
+                .or_default()
+                .push(ep.clone());
+        }
+
+        // Timestamps
+        let created_str = dev.created.format("%Y%m%d%H%M%SZ").to_string();
+        let last_seen_str = dev.last_seen.format("%Y%m%d%H%M%SZ").to_string();
+        let expires_str = dev.expires.format("%Y%m%d%H%M%SZ").to_string();
+        attrs.insert("tsCreated".to_string(), vec![created_str.clone()]);
+        attrs.insert("createTimestamp".to_string(), vec![created_str]);
+        attrs.insert("tsLastSeen".to_string(), vec![last_seen_str]);
+        attrs.insert("tsExpires".to_string(), vec![expires_str]);
+
+        // Booleans
+        attrs.insert(
+            "tsNeverExpires".to_string(),
+            vec![if dev.never_expires {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+        attrs.insert(
+            "tsAuthorized".to_string(),
+            vec![if dev.authorized {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+        attrs.insert(
+            "tsIsExternal".to_string(),
+            vec![if dev.is_external {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+        attrs.insert(
+            "tsUpdateAvailable".to_string(),
+            vec![if dev.update_available {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+        attrs.insert(
+            "tsRouteAll".to_string(),
+            vec![if dev.route_all {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+        attrs.insert(
+            "tsHasSubnet".to_string(),
+            vec![if dev.has_subnet {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }],
+        );
+
+        // Status – devices don't have a dedicated status field but we can
+        // synthesise one from the authorized flag.
+        attrs.insert(
+            "tsStatus".to_string(),
+            vec![if dev.authorized {
+                "authorized".to_string()
+            } else {
+                "unauthorized".to_string()
+            }],
+        );
+    }
+
     for user in ts_users {
         // split login name to get uid
         let uid_str = user
@@ -210,9 +405,13 @@ pub async fn get_all_entries(
             .entry("gidNumber".to_string())
             .or_insert_with(|| vec![id_str.clone()]);
 
-        // Prefer values from the device LocalAPI `CapMap` when available.
-        let mut found_shell: Option<String> = None;
-        let mut found_home: Option<String> = None;
+        // Override auto-generated LDAP attributes with values from the
+        // device LocalAPI `CapMap` (`dominicegginton.dev/cap/tsdit0`).
+        // Any string-valued key in the capability object is applied as an
+        // LDAP attribute override, so the ACL policy is the single source of
+        // truth for per-user customisation (loginShell, homeDirectory,
+        // uidNumber, gidNumber, gecos, description, etc.).
+        let mut cap_overrides: HashMap<String, String> = HashMap::new();
 
         if let Some(devs) = devices_by_user.get(&user.login_name) {
             for dev in devs {
@@ -221,78 +420,22 @@ pub async fn get_all_entries(
                     if let Ok(ip) = ip_str.parse::<IpAddr>() {
                         if let Some(Some(whois)) = whois_map.get(&ip) {
                             if let Some(ref cap_map) = whois.cap_map {
-                                // First prefer values inside our app capability key
-                                let app_key = "dominicegginton.dev/cap/tsdit000000000";
+                                let app_key = "dominicegginton.dev/cap/tsdit0";
                                 if let Some(app_val) = cap_map.get(app_key) {
-                                    // app_val may be an object or an array of objects
-                                    if let Some(obj) = app_val.as_object() {
-                                        if let Some(v) =
-                                            obj.get("loginShell").and_then(|x| x.as_str())
-                                        {
-                                            found_shell = Some(v.to_string());
-                                        }
-                                        if let Some(v) =
-                                            obj.get("homeDirectory").and_then(|x| x.as_str())
-                                        {
-                                            found_home = Some(v.to_string());
-                                        }
-                                    } else if let Some(arr) = app_val.as_array() {
-                                        if let Some(first) = arr.first().and_then(|x| x.as_object())
-                                        {
-                                            if let Some(v) =
-                                                first.get("loginShell").and_then(|x| x.as_str())
-                                            {
-                                                found_shell = Some(v.to_string());
+                                    // Resolve to a single JSON object (first element if array).
+                                    let obj = app_val
+                                        .as_object()
+                                        .or_else(|| {
+                                            app_val
+                                                .as_array()
+                                                .and_then(|a| a.first())
+                                                .and_then(|v| v.as_object())
+                                        });
+                                    if let Some(obj) = obj {
+                                        for (k, v) in obj {
+                                            if let Some(s) = v.as_str() {
+                                                cap_overrides.insert(k.clone(), s.to_string());
                                             }
-                                            if let Some(v) =
-                                                first.get("homeDirectory").and_then(|x| x.as_str())
-                                            {
-                                                found_home = Some(v.to_string());
-                                            }
-                                        }
-                                    }
-
-                                    // If both found inside app val, we can skip top-level checks
-                                    if found_shell.is_some() && found_home.is_some() {
-                                        // nothing
-                                    } else {
-                                        // fallthrough to check common top-level keys
-                                        for k in
-                                            ["loginShell", "login_shell", "shell", "unix_shell"]
-                                        {
-                                            if found_shell.is_none() {
-                                                if let Some(v) =
-                                                    cap_map.get(k).and_then(|x| x.as_str())
-                                                {
-                                                    found_shell = Some(v.to_string());
-                                                }
-                                            }
-                                        }
-                                        for k in
-                                            ["homeDirectory", "home_directory", "homedir", "home"]
-                                        {
-                                            if found_home.is_none() {
-                                                if let Some(v) =
-                                                    cap_map.get(k).and_then(|x| x.as_str())
-                                                {
-                                                    found_home = Some(v.to_string());
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // no app key; check top-level keys
-                                    for k in ["loginShell", "login_shell", "shell", "unix_shell"] {
-                                        if let Some(v) = cap_map.get(k).and_then(|x| x.as_str()) {
-                                            found_shell = Some(v.to_string());
-                                            break;
-                                        }
-                                    }
-                                    for k in ["homeDirectory", "home_directory", "homedir", "home"]
-                                    {
-                                        if let Some(v) = cap_map.get(k).and_then(|x| x.as_str()) {
-                                            found_home = Some(v.to_string());
-                                            break;
                                         }
                                     }
                                 }
@@ -300,19 +443,24 @@ pub async fn get_all_entries(
                         }
                     }
                 }
-
-                if found_shell.is_some() && found_home.is_some() {
+                if !cap_overrides.is_empty() {
                     break;
                 }
             }
         }
 
+        // Apply cap_map overrides – these win over auto-generated values.
+        for (key, value) in &cap_overrides {
+            attrs.insert(key.clone(), vec![value.clone()]);
+        }
+
+        // Set defaults for homeDirectory and loginShell if not overridden.
         attrs
             .entry("homeDirectory".to_string())
-            .or_insert_with(|| vec![found_home.unwrap_or_else(|| format!("/home/{}", uid))]);
+            .or_insert_with(|| vec![format!("/home/{}", uid)]);
 
         attrs.entry("loginShell".to_string()).or_insert_with(|| {
-            vec![found_shell.unwrap_or_else(|| "/run/current-system/sw/bin/bash".to_string())]
+            vec!["/run/current-system/sw/bin/bash".to_string()]
         });
 
         // Gecso field is good practice for legacy systems

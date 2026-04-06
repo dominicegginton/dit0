@@ -1,6 +1,7 @@
 // #![deny(warnings)]
 // #![allow(clippy::result_large_err)]
 
+mod audit;
 mod config;
 mod http;
 mod ldap;
@@ -89,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
         owned_certs.1.clone_key(),
     )));
 
+    let audit_log = audit::init();
+
     let state = crate::state::State {
         config: config.clone(),
         tailscale: ts_api.clone(),
@@ -96,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         env: Arc::new(env),
         ts_net: Arc::new(ts_net),
         certs: certs_store.clone(),
+        audit_log,
     };
 
     let http_state = state.clone();

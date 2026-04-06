@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use crate::audit;
 use crate::tailscale::LocalWhoIsResponse;
 
 fn has_cap(
@@ -39,6 +40,7 @@ pub async fn require_user(request: Request, next: Next) -> Result<Response, Stat
         Some(w) => {
             if let Some(up) = &w.user_profile {
                 if up.login_name == "tagged-devices" {
+                    audit::http_auth_failure("tagged-devices", "tagged device denied UI access");
                     return Ok(StatusCode::FORBIDDEN.into_response());
                 }
                 let cap_map = w.cap_map.clone().unwrap_or_default();
@@ -54,6 +56,11 @@ pub async fn require_user(request: Request, next: Next) -> Result<Response, Stat
     if allowed {
         Ok(next.run(request).await)
     } else {
+        let peer = whois
+            .and_then(|w| w.user_profile.as_ref())
+            .map(|up| up.login_name.as_str())
+            .unwrap_or("unknown");
+        audit::http_auth_failure(peer, &format!("denied access to {}", path));
         Ok(StatusCode::FORBIDDEN.into_response())
     }
 }
@@ -65,6 +72,7 @@ pub async fn require_allow_admin_ui(request: Request, next: Next) -> Result<Resp
         Some(w) => {
             if let Some(up) = &w.user_profile {
                 if up.login_name == "tagged-devices" {
+                    audit::http_auth_failure("tagged-devices", "tagged device denied admin UI");
                     return Ok(StatusCode::FORBIDDEN.into_response());
                 }
                 let cap_map = w.cap_map.clone().unwrap_or_default();
@@ -80,6 +88,11 @@ pub async fn require_allow_admin_ui(request: Request, next: Next) -> Result<Resp
     if allowed {
         Ok(next.run(request).await)
     } else {
+        let peer = whois
+            .and_then(|w| w.user_profile.as_ref())
+            .map(|up| up.login_name.as_str())
+            .unwrap_or("unknown");
+        audit::http_auth_failure(peer, "denied access to admin UI");
         Ok(StatusCode::FORBIDDEN.into_response())
     }
 }

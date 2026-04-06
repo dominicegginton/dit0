@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use super::schemas;
+use crate::audit;
 
 // ── Shared ACL helpers ──────────────────────────────────────────────────────
 
@@ -270,6 +271,7 @@ async fn handle_bind(
     client_addr: std::net::SocketAddr,
 ) -> Vec<LdapMsg> {
     if bind.cred == LdapBindCred::Simple("".to_string()) && bind.dn == "" {
+        audit::ldap_bind_anonymous(client_addr);
         return vec![LdapMsg {
             msgid,
             op: LdapOp::BindResponse(LdapBindResponse {
@@ -397,6 +399,7 @@ async fn handle_bind(
 
         let user_groups = extract_user_groups(&acl_preview);
         if !check_allow_bind(&policy, &user_groups) {
+            audit::ldap_bind_failure(client_addr, &bind.dn, "denied by ACL cap map");
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
@@ -438,6 +441,11 @@ async fn handle_bind(
                 let provided_totp = parts.next().unwrap_or("");
 
                 if provided_pass.is_empty() || provided_totp.is_empty() {
+                    audit::ldap_bind_failure(
+                        client_addr,
+                        &bind.dn,
+                        "missing password or TOTP component",
+                    );
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -481,6 +489,7 @@ async fn handle_bind(
                 let provided_hash = hex::encode(mac_pw.finalize().into_bytes());
 
                 if provided_hash != *stored_pw_hmac {
+                    audit::ldap_bind_failure(client_addr, &bind.dn, "incorrect password");
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -546,6 +555,7 @@ async fn handle_bind(
                 }
 
                 if ok {
+                    audit::ldap_bind_success(client_addr, &bind.dn, "simple+totp");
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -560,6 +570,7 @@ async fn handle_bind(
                         ctrl: vec![],
                     }];
                 } else {
+                    audit::ldap_bind_failure(client_addr, &bind.dn, "invalid TOTP code");
                     return vec![LdapMsg {
                         msgid,
                         op: LdapOp::BindResponse(LdapBindResponse {
@@ -575,6 +586,11 @@ async fn handle_bind(
                     }];
                 }
             } else {
+                audit::ldap_bind_failure(
+                    client_addr,
+                    &bind.dn,
+                    "incomplete OTP config (missing pw_hmac or totp_secret)",
+                );
                 return vec![LdapMsg {
                     msgid,
                     op: LdapOp::BindResponse(LdapBindResponse {
@@ -590,6 +606,7 @@ async fn handle_bind(
                 }];
             }
         } else {
+            audit::ldap_bind_failure(client_addr, &bind.dn, "no OTP record found");
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
@@ -606,6 +623,7 @@ async fn handle_bind(
         }
     }
 
+    audit::ldap_bind_failure(client_addr, &bind.dn, "invalid credentials");
     return vec![LdapMsg {
         msgid,
         op: LdapOp::BindResponse(LdapBindResponse {
@@ -621,6 +639,16 @@ async fn handle_bind(
     }];
 }
 
+/// Convert an LDAP search scope to a human-readable string for audit logs.
+fn scope_str(scope: &LdapSearchScope) -> &'static str {
+    match scope {
+        LdapSearchScope::Base => "base",
+        LdapSearchScope::OneLevel => "one",
+        LdapSearchScope::Subtree => "sub",
+        _ => "unknown",
+    }
+}
+
 async fn handle_search(
     tailscale: &Tailscale,
     config: &Config,
@@ -628,6 +656,7 @@ async fn handle_search(
     base_dn: &str,
     search: ldap3_proto::proto::LdapSearchRequest,
     req_controls: &[LdapControl],
+    client_addr: std::net::SocketAddr,
 ) -> Vec<LdapMsg> {
     // ── Subschema Subentry (RFC 4512 §4.2) ──────────────────────────────────
     // Match base-scope queries on "cn=Subschema" (case-insensitive).
@@ -958,6 +987,16 @@ async fn handle_search(
 
     let mut result: Vec<LdapMsg> = result_entries;
 
+    // Count search result entries (excluding the final SearchResultDone).
+    let result_count = result.len();
+    audit::ldap_search(
+        client_addr,
+        &search.base,
+        scope_str(&search.scope),
+        &format!("{:?}", search.filter),
+        result_count,
+    );
+
     result.push(LdapMsg {
         msgid,
         op: LdapOp::SearchResultDone(LdapResult {
@@ -1006,9 +1045,19 @@ pub async fn handle_request(
             .await
         }
         LdapOp::SearchRequest(search) => {
-            handle_search(tailscale, config, msgid, base_dn, search, &req.ctrl).await
+            handle_search(
+                tailscale,
+                config,
+                msgid,
+                base_dn,
+                search,
+                &req.ctrl,
+                client_addr,
+            )
+            .await
         }
         LdapOp::CompareRequest(_) => {
+            audit::ldap_unsupported_op(client_addr, "compare");
             vec![LdapMsg {
                 msgid,
                 op: LdapOp::ExtendedResponse(LdapExtendedResponse {
@@ -1074,6 +1123,7 @@ pub async fn handle_request(
             }]
         }
         _ => {
+            audit::ldap_unsupported_op(client_addr, "unknown");
             vec![LdapMsg {
                 msgid,
                 op: LdapOp::ExtendedResponse(LdapExtendedResponse {

@@ -1,5 +1,5 @@
-use super::auth::require_user;
-use super::handlers::{credentials_reset, credentials_setup, user};
+use super::auth::{require_allow_admin_ui, require_user};
+use super::handlers::{admin_audit_api, admin_dashboard, credentials_reset, credentials_setup, user};
 use super::state::AppState;
 use crate::tailscale::UserClaims;
 use axum::{
@@ -53,8 +53,14 @@ impl Server for HttpsServer {
             .route("/credentials/reset", post(credentials_reset))
             .route_layer(middleware::from_fn(require_user));
 
+        let admin_routes = Router::new()
+            .route("/admin", get(admin_dashboard))
+            .route("/admin/api/audit", get(admin_audit_api))
+            .route_layer(middleware::from_fn(require_allow_admin_ui));
+
         let app = Router::new()
             .merge(protected_routes)
+            .merge(admin_routes)
             .layer(TraceLayer::new_for_http())
             .with_state(self.state.clone());
 
@@ -132,7 +138,7 @@ impl Server for HttpsServer {
                                                 }
                                                 _ => {
                                                     let cap_map = w.cap_map.clone().unwrap_or_default();
-                                                    let bindable = cap_map.get("dominicegginton.dev/cap/tsdit").map_or(false, |val| {
+                                                    let bindable = cap_map.get("dominicegginton.dev/cap/tsdit0").map_or(false, |val| {
                                                         if let serde_json::Value::Array(arr) = val {
                                                             arr.iter().any(|item| {
                                                                 if let serde_json::Value::Object(obj) = item {
@@ -148,7 +154,7 @@ impl Server for HttpsServer {
                                                         }
                                                     });
                                                     let reasons_vec: Vec<String> = if bindable {
-                                                        if let Some(serde_json::Value::Array(arr)) = cap_map.get("dominicegginton.dev/cap/tsdit") {
+                                                        if let Some(serde_json::Value::Array(arr)) = cap_map.get("dominicegginton.dev/cap/tsdit0") {
                                                             arr.iter().filter_map(|item| {
                                                                 if let serde_json::Value::Object(obj) = item {
                                                                     let mut reason_parts = Vec::new();

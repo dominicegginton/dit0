@@ -1,3 +1,4 @@
+use crate::audit::AuditLog;
 use crate::config::Config;
 use crate::tailscale::Tailscale;
 use libtailscale::Tailscale as TsNet;
@@ -15,4 +16,5 @@ pub struct State {
     pub env: Arc<Environment>,
     pub ts_net: Arc<TsNet>,
     pub certs: Arc<RwLock<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>>,
+    pub audit_log: AuditLog,
 }

@@ -9,6 +9,7 @@ use tokio_util::codec::Framed;
 use tracing::error;
 
 use super::handlers::handle_request;
+use crate::audit;
 use crate::config::Config;
 use crate::tailscale::Tailscale;
 
@@ -33,6 +34,7 @@ pub async fn handle_client(
         let msg = msg.unwrap();
         request_count += 1;
         if request_count > MAX_REQUESTS {
+            audit::ldap_connection_event(addr, "max requests exceeded");
             error!("Max requests per connection exceeded for {}", addr);
             break;
         }
