@@ -21,7 +21,7 @@ regex = "1.9"
 bytes = "1.4"
 futures = "0.3"
 axum = { version = "0.7", features = ["macros"] }
-image = "0.23.12"
+image = "0.25.10"
 aws-lc-sys = "0.39.0"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "trace"] }
@@ -31,7 +31,7 @@ tower-sessions-memory-store = "0.13.0"
 serde_urlencoded = "0.7.1"
 argon2 = "0.5.2"
 v_htmlescape = "0.15.8"
-rand = "0.8.5"
+rand = "0.9.2"
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 password-hash = "0.5.0"
 hex = "0.4"
