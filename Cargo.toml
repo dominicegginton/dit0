@@ -20,7 +20,7 @@ lazy_static = "1.4"
 regex = "1.9"
 bytes = "1.4"
 futures = "0.3"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 image = "0.25.10"
 aws-lc-sys = "0.41.0"
 tower = "0.4"
