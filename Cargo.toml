@@ -46,7 +46,7 @@ toml = "0.7"
 deser-hjson = "2.2"
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 urlencoding = "2.1"
-oauth2 = "4.0"
+oauth2 = "5.0"
 chrono = "0.4.44"
 libtailscale = "0.2"
 tracing-rfc-5424 = "0.2"
