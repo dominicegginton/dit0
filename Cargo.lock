@@ -3101,20 +3101,22 @@ dependencies = [
 
 [[package]]
 name = "tailscale-localapi"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c0befa7b50f25c48fbcb09da1cf809ff26c497e421ce14f92e638b5896af426"
+checksum = "40b7b2b7e4523517354a2b27b2cff69f068af6e0e1fde67e6acb0d03e7562b53"
 dependencies = [
- "async-trait",
- "base64 0.21.7",
+ "base64 0.22.1",
+ "bytes",
  "chrono",
- "http 0.2.12",
- "hyper 0.14.32",
- "rustls-pemfile 1.0.4",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde-aux",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
