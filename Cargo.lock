@@ -647,7 +647,7 @@ dependencies = [
  "aws-lc-sys 0.41.0",
  "axum",
  "base32",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "deser-hjson",
