@@ -44,7 +44,7 @@ qrcode = "0.8"
 # Config parsing
 toml = "0.7"
 deser-hjson = "2.2"
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 urlencoding = "2.1"
 oauth2 = "5.0"
 chrono = "0.4.44"
