@@ -22,7 +22,7 @@ bytes = "1.4"
 futures = "0.3"
 axum = { version = "0.8", features = ["macros"] }
 image = "0.25.10"
-aws-lc-sys = "0.41.0"
+aws-lc-sys = "0.42.0"
 tower = "0.5"
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 tower-sessions = "0.13.0"
