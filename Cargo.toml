@@ -30,7 +30,7 @@ time = { version = "0.3.47", features = ["macros", "parsing", "formatting"] }
 tower-sessions-memory-store = "0.15.0"
 serde_urlencoded = "0.7.1"
 argon2 = "0.5.2"
-v_htmlescape = "0.15.8"
+v_htmlescape = "0.17.0"
 rand = "0.10.1"
 uuid = { version = "1.23.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 password-hash = "0.6.1"
