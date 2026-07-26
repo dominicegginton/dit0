@@ -25,7 +25,7 @@ image = "0.25.10"
 aws-lc-sys = "0.41.0"
 tower = "0.5"
 tower-http = { version = "0.5", features = ["fs", "trace"] }
-tower-sessions = "0.13.0"
+tower-sessions = "0.15.0"
 time = { version = "0.3.47", features = ["macros", "parsing", "formatting"] }
 tower-sessions-memory-store = "0.15.0"
 serde_urlencoded = "0.7.1"
