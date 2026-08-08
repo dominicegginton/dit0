@@ -36,7 +36,7 @@ let
 
     buildCommand = ''
       chmod -R +w ./ 
-      cd src/libtailscale
+      cd ./libtailscale
       go mod vendor
       cp -r vendor $out
     '';
