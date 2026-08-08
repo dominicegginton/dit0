@@ -10,16 +10,16 @@ use axum::{
 };
 use base32;
 use base64;
+use base64::Engine as _;
 use hex;
 use hmac::{Hmac, Mac};
 use lmdb::Transaction;
 use qrcode::render::svg;
 use qrcode::QrCode;
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
-use v_htmlescape::escape;
+use v_htmlescape::escape_fmt;
 
 // ── Admin dashboard ──────────────────────────────────────────────────────────
 
@@ -91,10 +91,10 @@ pub async fn admin_dashboard(
         };
         users_rows.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape(uid),
-            escape(&u.login_name),
-            escape(&u.role),
-            escape(&u.status),
+            escape_fmt(uid),
+            escape_fmt(&u.login_name),
+            escape_fmt(&u.role),
+            escape_fmt(&u.status),
             otp_badge
         ));
     }
@@ -127,12 +127,12 @@ pub async fn admin_dashboard(
         devices_rows.push_str(&format!(
             "<tr><td><a href=\"{}\" target=\"_blank\">{}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             ts_device_url,
-            escape(&hostname),
-            escape(&addrs),
-            escape(&d.os),
+            escape_fmt(&hostname),
+            escape_fmt(&addrs),
+            escape_fmt(&d.os),
             auth_badge,
-            escape(&d.user),
-            escape(&last_seen)
+            escape_fmt(&d.user),
+            escape_fmt(&last_seen)
         ));
     }
     let devices_table = format!(
@@ -159,7 +159,7 @@ pub async fn admin_dashboard(
                 <tr><td>ou=machines</td><td>{}</td></tr>
             </tbody>
         </table>"#,
-        escape(base_dn),
+        escape_fmt(base_dn),
         people_count,
         groups_count,
         machines_count
@@ -650,7 +650,7 @@ pub async fn admin_dashboard(
             }}
         }})();
         </script>"#,
-        escape(&admin_user),
+        escape_fmt(&admin_user),
         stats_html,
         users_table,
         devices_table,
@@ -740,7 +740,7 @@ async fn render_profile(state: &AppState, user: &User, csrf_token: Option<&str>)
     super::views::base_layout(
         &format!(
             "Profile: {}",
-            escape(user.display_name.as_deref().unwrap_or(""))
+            escape_fmt(user.display_name.as_deref().unwrap_or(""))
         ),
         &format!(
             r#"
@@ -763,9 +763,9 @@ async fn render_profile(state: &AppState, user: &User, csrf_token: Option<&str>)
             </div>
             </div>
             "#,
-            escape(user.profile_pic_url.as_deref().unwrap_or("")),
-            escape(user.display_name.as_deref().unwrap_or("")),
-            escape(&format!("uid={},ou=people,{}", username, base_dn)),
+            escape_fmt(user.profile_pic_url.as_deref().unwrap_or("")),
+            escape_fmt(user.display_name.as_deref().unwrap_or("")),
+            escape_fmt(&format!("uid={},ou=people,{}", username, base_dn)),
             body
         ),
     )
@@ -786,11 +786,14 @@ pub async fn user(
         .into_iter()
         .find(|u| u.login_name == email || u.login_name.starts_with(&email));
 
-    let csrf_token: String = rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
+    let csrf_token: String = {
+        let mut rng = rand::rng();
+        (&mut rng)
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect()
+    };
 
     if let Some(u) = user_obj {
         let body = render_profile(&state, &u, Some(&csrf_token)).await;
@@ -896,8 +899,9 @@ pub async fn credentials_setup(
 
     // Generate TOTP secret
     let mut secret_bytes = [0u8; 20];
-    rand::thread_rng().fill(&mut secret_bytes);
-    let secret_b32 = base32::encode(base32::Alphabet::RFC4648 { padding: false }, &secret_bytes);
+    let mut rng = rand::rng();
+    rng.fill(&mut secret_bytes);
+    let secret_b32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -951,7 +955,7 @@ pub async fn credentials_setup(
     let qr_data_uri = match QrCode::new(otpauth.as_bytes()) {
         Ok(code) => {
             let svg_str = code.render::<svg::Color>().min_dimensions(200, 200).build();
-            let b64 = base64::encode(svg_str.as_bytes());
+            let b64 = base64::engine::general_purpose::STANDARD.encode(svg_str.as_bytes());
             format!("data:image/svg+xml;base64,{}", b64)
         }
         Err(_) => String::new(),

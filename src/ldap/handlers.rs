@@ -517,7 +517,7 @@ async fn handle_bind(
                 }
 
                 let secret_bytes_opt = base32::decode(
-                    base32::Alphabet::RFC4648 { padding: false },
+                    base32::Alphabet::Rfc4648 { padding: false },
                     totp_secret.as_str(),
                 );
                 if secret_bytes_opt.is_none() {
