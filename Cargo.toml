@@ -35,7 +35,7 @@ rand = "0.10.1"
 uuid = { version = "1.23.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 password-hash = "0.6.1"
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 sha1 = "0.10"
 subtle = "2.5"
