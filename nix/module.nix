@@ -1,3 +1,5 @@
+# NixOS module for the dit0 service.
+# This module configures a systemd service, user/group, and sandboxing for running dit0 securely.
 { lib
 , config
 , pkgs
@@ -8,6 +10,8 @@ let
   cfg = config.services.dit0;
 
   # Generate config.json at build time using lib.writeJSON.
+  # Secret files are referenced using systemd LoadCredential path variables ($CREDENTIALS_DIRECTORY)
+  # to avoid putting secrets in the Nix store.
   configJson = lib.writeJSON "config.json" (
     let
       baseConfig = {
@@ -30,7 +34,6 @@ let
 in
 
 {
-
   options.services.dit0 = {
     enable = lib.mkEnableOption "dit0 — a directory information tree for your TailNet";
 
@@ -108,32 +111,31 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-
+    # System user and group configuration.
     users.users.dit0 = {
       isSystemUser = true;
       group = "dit0";
-      home = cfg.dataDir;
+      home = cfg.data_dir;
       description = "dit0 service user";
     };
     users.groups.dit0 = { };
 
+    # Ensure the directory exists with secure permissions.
     systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0750 dit0 dit0 -"
+      "d ${cfg.data_dir} 0750 dit0 dit0 -"
     ];
 
+    # systemd service configuration.
     systemd.services.dit0 = {
       description = "dit0 — directory information tree for your TailNet";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      # Config is generated at runtime by ExecStartPre so that
-      # secret file paths reference $CREDENTIALS_DIRECTORY and
-      # never appear in the Nix store.
-      environment.CONFIG_FILE = "/run/dit0/config.json";
+      # Supply the build-time generated JSON configuration via CONFIG_FILE.
+      environment.CONFIG_FILE = "${configJson}";
 
       serviceConfig = {
-        ExecStartPre = [ "${genConfigScript}" ];
         ExecStart = "${cfg.package}/bin/dit0";
         Restart = "on-failure";
         RestartSec = 5;
@@ -143,18 +145,16 @@ in
         Group = "dit0";
 
         # --- Secrets via systemd credentials ---
-        # Secret files are copied into a private per-service
-        # directory ($CREDENTIALS_DIRECTORY) at start. The
-        # originals only need to be readable by root — they are
-        # never accessed by the service directly.
+        # Secret files are copied into a private per-service directory ($CREDENTIALS_DIRECTORY)
+        # at start. The originals only need to be readable by root.
         LoadCredential = [
-          "ts-api-key:${cfg.tailscale.apiKeyFile}"
-          "otp-hmac-key:${cfg.otpHmacKeyFile}"
-        ] ++ lib.optional (cfg.tailscale.authKeyFile != null)
-          "ts-auth-key:${cfg.tailscale.authKeyFile}";
+          "ts-api-key:${cfg.ts_api_key_file}"
+          "otp-hmac-key:${cfg.otp_hmac_key_file}"
+        ] ++ lib.optional (cfg.ts_auth_key_file != null)
+          "ts-auth-key:${cfg.ts_auth_key_file}";
 
         # --- State & Directories ---
-        WorkingDirectory = cfg.dataDir;
+        WorkingDirectory = cfg.data_dir;
         StateDirectory = "dit0";
         StateDirectoryMode = "0750";
         RuntimeDirectory = "dit0";
@@ -211,7 +211,7 @@ in
 
         # --- File-system access ---
         ReadWritePaths = [
-          cfg.dataDir
+          cfg.data_dir
         ];
 
         # --- Misc ---
