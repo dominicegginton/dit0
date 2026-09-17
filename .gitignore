@@ -3,3 +3,4 @@ lmdb
 tsnet
 otp_hmac_key
 ts_api_key
+yubico_secret_key
