@@ -1,5 +1,3 @@
-# NixOS module for the dit0 service.
-# This module configures a systemd service, user/group, and sandboxing for running dit0 securely.
 { lib
 , config
 , pkgs
@@ -10,8 +8,6 @@ let
   cfg = config.services.dit0;
 
   # Generate config.json at build time using lib.writeJSON.
-  # Secret files are referenced using systemd LoadCredential path variables ($CREDENTIALS_DIRECTORY)
-  # to avoid putting secrets in the Nix store.
   configJson = lib.writeJSON "config.json" (
     let
       baseConfig = {
@@ -40,6 +36,7 @@ let
 in
 
 {
+
   options.services.dit0 = {
     enable = lib.mkEnableOption "dit0 — a directory information tree for your TailNet";
 
@@ -128,7 +125,6 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # System user and group configuration.
     users.users.dit0 = {
       isSystemUser = true;
       group = "dit0";
@@ -137,19 +133,16 @@ in
     };
     users.groups.dit0 = { };
 
-    # Ensure the directory exists with secure permissions.
     systemd.tmpfiles.rules = [
       "d ${cfg.data_dir} 0750 dit0 dit0 -"
     ];
 
-    # systemd service configuration.
     systemd.services.dit0 = {
       description = "dit0 — directory information tree for your TailNet";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      # Supply the build-time generated JSON configuration via CONFIG_FILE.
       environment.CONFIG_FILE = "${configJson}";
 
       serviceConfig = {
@@ -162,8 +155,10 @@ in
         Group = "dit0";
 
         # --- Secrets via systemd credentials ---
-        # Secret files are copied into a private per-service directory ($CREDENTIALS_DIRECTORY)
-        # at start. The originals only need to be readable by root.
+        # Secret files are copied into a private per-service
+        # directory ($CREDENTIALS_DIRECTORY) at start. The
+        # originals only need to be readable by root — they are
+        # never accessed by the service directly.
         LoadCredential = [
           "ts-api-key:${cfg.ts_api_key_file}"
         ] ++ lib.optional (cfg.ts_auth_key_file != null)
@@ -185,7 +180,6 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = true;
-        PrivateMounts = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectKernelLogs = true;
@@ -197,7 +191,6 @@ in
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
-        KeyringMode = "private";
         RestrictAddressFamilies = [
           "AF_INET"
           "AF_INET6"
@@ -231,7 +224,7 @@ in
 
         # --- File-system access ---
         ReadWritePaths = [
-          cfg.data_dir
+          cfg.dataDir
         ];
 
         # --- Misc ---

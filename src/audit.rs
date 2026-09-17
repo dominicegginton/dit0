@@ -315,46 +315,74 @@ pub fn ldap_connection_event(peer: SocketAddr, reason: &str) {
 
 // ── HTTP / credential events ────────────────────────────────────────────────
 
-/// A user accessed the web UI.
-pub fn http_access(user: &str, path: &str, status: u16) {
+/// A user registered a YubiKey.
+pub fn yubikey_registered(user: &str, public_id: &str) {
     tracing::info!(
         target: TARGET,
-        event = "http_access",
+        event = "yubikey_registered",
         user = %user,
-        path = %path,
-        status = status,
-        "HTTP request"
+        public_id = %public_id,
+        "YubiKey registered"
     );
     record(
-        "http_access",
-        &status.to_string(),
+        "yubikey_registered",
+        "success",
         user,
-        &format!("{} -> {}", path, status),
+        &format!("public_id={}", public_id),
     );
 }
 
-/// A user configured new LDAP credentials (password + TOTP).
-pub fn credentials_setup(user: &str, dn: &str) {
+/// A user revoked a YubiKey.
+pub fn yubikey_revoked(user: &str, public_id: &str) {
     tracing::info!(
         target: TARGET,
-        event = "credentials_setup",
+        event = "yubikey_revoked",
         user = %user,
-        dn = %dn,
-        "LDAP credentials configured"
+        public_id = %public_id,
+        "YubiKey revoked"
     );
-    record("credentials_setup", "success", user, dn);
+    record(
+        "yubikey_revoked",
+        "success",
+        user,
+        &format!("public_id={}", public_id),
+    );
 }
 
-/// A user reset (deleted) their LDAP credentials.
-pub fn credentials_reset(user: &str, dn: &str) {
+/// An administrator registered a YubiKey for a user.
+pub fn admin_yubikey_registered(admin: &str, user: &str, public_id: &str) {
     tracing::info!(
         target: TARGET,
-        event = "credentials_reset",
+        event = "admin_yubikey_registered",
+        admin = %admin,
         user = %user,
-        dn = %dn,
-        "LDAP credentials reset"
+        public_id = %public_id,
+        "Admin registered YubiKey for user"
     );
-    record("credentials_reset", "success", user, dn);
+    record(
+        "admin_yubikey_registered",
+        "success",
+        admin,
+        &format!("target_user={} public_id={}", user, public_id),
+    );
+}
+
+/// An administrator revoked a YubiKey from a user.
+pub fn admin_yubikey_revoked(admin: &str, user: &str, public_id: &str) {
+    tracing::info!(
+        target: TARGET,
+        event = "admin_yubikey_revoked",
+        admin = %admin,
+        user = %user,
+        public_id = %public_id,
+        "Admin revoked YubiKey from user"
+    );
+    record(
+        "admin_yubikey_revoked",
+        "success",
+        admin,
+        &format!("target_user={} public_id={}", user, public_id),
+    );
 }
 
 /// Credential setup was rejected (already configured, weak password, etc.).

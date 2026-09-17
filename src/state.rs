@@ -1,6 +1,7 @@
 use crate::audit::AuditLog;
 use crate::config::Config;
 use crate::tailscale::Tailscale;
+use crate::yubikey::YubikeyValidator;
 use libtailscale::Tailscale as TsNet;
 use lmdb::{Database, Environment};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -12,7 +13,8 @@ use tokio::sync::RwLock;
 pub struct State {
     pub config: Config,
     pub tailscale: Tailscale,
-    pub otp_db: Database,
+    pub yubikey_db: Database,
+    pub yubikey_validator: Arc<YubikeyValidator>,
     pub env: Arc<Environment>,
     pub ts_net: Arc<TsNet>,
     pub certs: Arc<RwLock<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>>,

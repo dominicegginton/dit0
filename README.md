@@ -4,13 +4,14 @@ LDAP server backed by Tailscale, providing user and device directory services ov
 
 ## Features
 
-- LDAPS (LDAP over TLS) served via Tailscale tsnet
-- User authentication with password + TOTP (`password::123456`)
-- POSIX account and group attributes derived from Tailscale ACL grants
-- Tailscale devices exposed as `ipHost` / `device` entries under `ou=machines` (for sssd / hostname resolution)
-- Structured audit logging for bind, search, credential, and connection events (target: `audit`)
-- Web UI for credential setup (password + TOTP)
-- RootDSE support for LDAP client auto-discovery
+- **Hardware-backed User Authentication**: Complete passwordless and TOTP-free authentication using any genuine YubiKey.
+- **Web UI YubiKey Registration**: Simple web portal for users to register, manage, and label multiple YubiKeys.
+- **SSHD / PAM Integration**: Authenticate logins to secure hosts over SSH by simply tapping your registered YubiKey at the password prompt.
+- **LDAPS (LDAP over TLS)** served securely via Tailscale tsnet.
+- **POSIX account and group attributes** derived dynamically from Tailscale ACL grants.
+- **Tailscale devices** exposed as `ipHost` / `device` entries under `ou=machines` (for sssd / hostname resolution).
+- **Structured audit logging** for bind, search, credential, and connection events (target: `audit`).
+- **RootDSE support** for seamless LDAP client auto-discovery.
 
 ## Configuration
 
@@ -26,12 +27,14 @@ Set `CONFIG_FILE` environment variable (defaults to `config.json`):
   "base_dn": "dc=example,dc=com",
   "ts_hostname": "dit0",
   "ts_auth_key_file": "/run/secrets/ts_auth_key",
-  "otp_hmac_key_file": "/run/secrets/otp_hmac_key",
+  "yubico_client_id": "12345",
+  "yubico_secret_key_file": "/run/secrets/yubico_secret_key",
+  "yubico_api_url": "https://api.yubico.com/wsapi/2.0/verify",
   "data_dir": "/var/lib/dit0"
 }
 ```
 
-Secret fields (`ts_api_key_file`, `ts_auth_key_file`, `otp_hmac_key_file`) are paths to files containing the secret values.
+Secret fields (`ts_api_key_file`, `ts_auth_key_file`, `yubico_secret_key_file`) are paths to files containing the secret values.
 
 ## Tailscale ACL Configuration
 
@@ -191,6 +194,42 @@ Add the module to your NixOS configuration and enable the service:
 | `tailscale.authKeyFile` | `path?` | `null` | Optional Tailscale auth key for auto-registration |
 | `tailscale.domain` | `string` | — | Tailnet domain / name |
 | `tailscale.hostname` | `string` | `dit0` | Hostname to register on the tailnet |
+
+### Client NixOS module (SSHD & PAM / NSS for YubiKey Login)
+
+Add the client module to allow users registered in dit0 to log into the host over SSH (or local PAM) by touching their registered YubiKey:
+
+```nix
+{ inputs, ... }:
+
+{
+  imports = [ inputs.dit0.nixosModules.client ];
+
+  services.dit0.client = {
+    enable = true;
+    server = "ldaps://dit0.your-tailnet.ts.net:636";
+    base_dn = "dc=example";
+  };
+}
+```
+
+When connecting via SSH (`ssh username@host`), users simply touch their registered YubiKey at the password prompt. PAM queries `dit0` over LDAPS, which validates the OTP against the user's registered keys and authorizes the session. Home directories are automatically generated upon first login.
+
+### Client module options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable` | `bool` | `false` | Enable dit0 SSH & NSS/PAM client integration |
+| `server` | `string` | — | URI of the dit0 LDAPS/LDAP server |
+| `base_dn` | `string` | — | Base distinguished name for the LDAP directory |
+| `bind_dn` | `string?` | `null` | Optional bind DN for searches |
+| `bind_password_file` | `path?` | `null` | Optional path to bind password file |
+| `ssl` | `enum` | `"on"` | SSL/TLS mode (`"on"`, `"off"`, `"start_tls"`) |
+| `tls_reqcert` | `enum` | `"demand"` | TLS certificate verification policy (`"demand"`, `"allow"`, `"never"`, etc.) |
+| `tls_cacertfile` | `path?` | `null` | Optional path to custom CA certificate |
+| `makeHomeDir` | `bool` | `true` | Automatically create home directories on login via `pam_mkhomedir` |
+| `enableSshd` | `bool` | `true` | Configure OpenSSH with PAM and keyboard-interactive authentication |
+| `extraConfig` | `lines` | `""` | Extra lines appended to `nslcd.conf` |
 
 ### Secrets management
 

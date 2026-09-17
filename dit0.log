@@ -1,0 +1,25 @@
+nohup: ignoring input
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s
+     Running `target/debug/dit0`
+2026/09/17 23:11:40 tsnet running state path data/tsnet/tailscaled.state
+2026/09/17 23:11:40 tsnet starting with hostname "dit0", varRoot "./data/tsnet"
+[2m2026-09-17T22:11:40.799248Z[0m [35mTRACE[0m checkout waiting for idle connection: ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:40.799399Z[0m [34mDEBUG[0m starting new connection: http://127.0.0.1:44529/
+[2m2026-09-17T22:11:40.799492Z[0m [35mTRACE[0m Http::connect; scheme=Some("http"), host=Some("127.0.0.1"), port=Some(Port(44529))
+[2m2026-09-17T22:11:40.799564Z[0m [34mDEBUG[0m connecting to 127.0.0.1:44529
+[2m2026-09-17T22:11:40.799788Z[0m [34mDEBUG[0m connected to 127.0.0.1:44529
+[2m2026-09-17T22:11:40.799855Z[0m [35mTRACE[0m http1 handshake complete, spawning background dispatcher task
+[2m2026-09-17T22:11:40.799930Z[0m [35mTRACE[0m waiting for connection to be ready
+[2m2026-09-17T22:11:40.800036Z[0m [35mTRACE[0m connection is ready
+[2m2026-09-17T22:11:40.800069Z[0m [35mTRACE[0m checkout dropped for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:40.801524Z[0m [35mTRACE[0m shouldn't retry!
+[2m2026-09-17T22:11:40.802007Z[0m [35mTRACE[0m put; add idle connection for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:40.802066Z[0m [34mDEBUG[0m pooling idle connection for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:40.803911Z[0m [32m INFO[0m LocalAPI certificate_pair request: domain=dit0.soay-puffin.ts.net path=/localapi/v0/cert/dit0.soay-puffin.ts.net?type=pair local_api_addr=Some("127.0.0.1:44529")
+[2m2026-09-17T22:11:40.804244Z[0m [35mTRACE[0m take? ("http", 127.0.0.1:44529): expiration = Some(90s)
+[2m2026-09-17T22:11:40.804287Z[0m [34mDEBUG[0m reuse idle connection for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:41.383745Z[0m [35mTRACE[0m shouldn't retry!
+[2m2026-09-17T22:11:41.384156Z[0m [35mTRACE[0m put; add idle connection for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:41.384246Z[0m [34mDEBUG[0m pooling idle connection for ("http", 127.0.0.1:44529)
+[2m2026-09-17T22:11:41.386422Z[0m [32m INFO[0m Loaded 98 audit events from disk (keys 0..97)
+2026/09/17 23:11:45 AuthLoop: state is Running; done

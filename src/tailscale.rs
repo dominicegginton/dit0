@@ -502,7 +502,7 @@ impl fmt::Display for APIError {
         write!(
             f,
             "APIError: status code -> {}, body -> {}",
-            self.status_code.to_string(),
+            self.status_code,
             self.body
         )
     }
@@ -513,7 +513,7 @@ impl fmt::Debug for APIError {
         write!(
             f,
             "APIError: status code -> {}, body -> {}",
-            self.status_code.to_string(),
+            self.status_code,
             self.body
         )
     }
@@ -532,12 +532,14 @@ pub struct APIResponse {
 }
 
 // Public type aliases for clarity
+#[allow(dead_code)]
 pub type ListDevicesResponse = APIResponse;
 
 /// Wrapper type for ACL preview responses. The exact shape of the preview
 /// response can vary; keep it as an untyped JSON value but expose a named
 /// type so callers can depend on a stable return type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AclPreviewResponse(pub serde_json::Value);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -643,6 +645,7 @@ pub struct UserClaims {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct LocalWhoIsResponse {
     #[serde(rename = "UserProfile")]
     pub user_profile: Option<LocalUserProfile>,
@@ -653,6 +656,7 @@ pub struct LocalWhoIsResponse {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct LocalUserProfile {
     #[serde(rename = "LoginName")]
     pub login_name: String,
@@ -667,6 +671,7 @@ pub struct LocalUserProfile {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct LocalNode {
     #[serde(rename = "ID")]
     pub id: Option<u64>,
@@ -705,6 +710,7 @@ pub struct LocalNode {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct LocalHostInfo {
     #[serde(rename = "OS")]
     pub os: Option<String>,
@@ -715,6 +721,7 @@ pub struct LocalHostInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct LocalService {
     #[serde(rename = "Proto")]
     pub proto: Option<String>,

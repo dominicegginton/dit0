@@ -70,6 +70,7 @@ pub fn matching_rule_use() -> Vec<String> {
 // ── Attribute Types ─────────────────────────────────────────────────────────
 
 /// Returns the full RFC 4512 §4.1.2 `attributeTypes` definitions.
+#[allow(clippy::vec_init_then_push)]
 pub fn attribute_types() -> Vec<String> {
     let mut v = Vec::new();
 
@@ -129,14 +130,9 @@ pub fn attribute_types() -> Vec<String> {
     v.push("( 2.16.840.1.113730.3.1.36 NAME 'vendorName' DESC 'RFC 3045: vendor name' EQUALITY caseExactMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE NO-USER-MODIFICATION USAGE dSAOperation )".into());
     v.push("( 2.16.840.1.113730.3.1.37 NAME 'vendorVersion' DESC 'RFC 3045: vendor version' EQUALITY caseExactMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE NO-USER-MODIFICATION USAGE dSAOperation )".into());
 
-    // ── OATH (OTP) attributes (custom OIDs) ──
-    let oath_base = format!("{}.1", DIT0_OID_BASE);
-    v.push(format!("( {}.1 NAME 'oathSecret' DESC 'OATH shared secret' EQUALITY octetStringMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.40 SINGLE-VALUE )", oath_base));
-    v.push(format!("( {}.2 NAME 'oathTokenIdentifier' DESC 'OATH token identifier' EQUALITY caseExactMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )", oath_base));
-    v.push(format!("( {}.3 NAME 'oathCounter' DESC 'OATH HOTP counter' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )", oath_base));
-    v.push(format!("( {}.4 NAME 'oathDigits' DESC 'OATH number of digits' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )", oath_base));
-    v.push(format!("( {}.5 NAME 'oathWindow' DESC 'OATH look-ahead window' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )", oath_base));
-    v.push(format!("( {}.6 NAME 'oathTimeStep' DESC 'OATH TOTP time step in seconds' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )", oath_base));
+    // ── YubiKey attributes (custom OIDs) ──
+    let yk_base = format!("{}.1", DIT0_OID_BASE);
+    v.push(format!("( {}.1 NAME 'yubikeyPublicId' DESC 'YubiKey modhex public ID prefix' EQUALITY caseIgnoreMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )", yk_base));
 
     // ── Sudo attributes (1.3.6.1.4.1.15953.9.1.*) ──
     v.push("( 1.3.6.1.4.1.15953.9.1.1 NAME 'sudoUser' DESC 'sudo user or group' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )".into());
@@ -204,6 +200,7 @@ pub fn attribute_types() -> Vec<String> {
 // ── Object Classes ──────────────────────────────────────────────────────────
 
 /// Returns the full RFC 4512 §4.1.1 `objectClasses` definitions.
+#[allow(clippy::vec_init_then_push)]
 pub fn object_classes() -> Vec<String> {
     let mut v = Vec::new();
 
@@ -228,10 +225,9 @@ pub fn object_classes() -> Vec<String> {
     v.push("( 1.3.6.1.1.1.2.2 NAME 'posixGroup' DESC 'RFC 2307: abstraction of a group of accounts' SUP top STRUCTURAL MUST ( cn $ gidNumber ) MAY ( userPassword $ memberUid $ description ) )".into());
     v.push("( 1.3.6.1.1.1.2.6 NAME 'ipHost' DESC 'RFC 2307: an IP host' SUP top AUXILIARY MUST ( cn $ ipHostNumber ) MAY ( description ) )".into());
 
-    // ── OATH OTP ──
-    let oath_oc_base = format!("{}.3", DIT0_OID_BASE);
-    v.push(format!("( {}.1 NAME 'oathTOTPUser' DESC 'OATH TOTP user' SUP top AUXILIARY MAY ( oathSecret $ oathTokenIdentifier $ oathDigits $ oathTimeStep ) )", oath_oc_base));
-    v.push(format!("( {}.2 NAME 'oathHOTPUser' DESC 'OATH HOTP user' SUP top AUXILIARY MAY ( oathSecret $ oathTokenIdentifier $ oathCounter $ oathDigits $ oathWindow ) )", oath_oc_base));
+    // ── YubiKey User ──
+    let yk_oc_base = format!("{}.3", DIT0_OID_BASE);
+    v.push(format!("( {}.1 NAME 'yubikeyUser' DESC 'YubiKey authenticated user' SUP top AUXILIARY MAY ( yubikeyPublicId ) )", yk_oc_base));
 
     // ── Sudo (1.3.6.1.4.1.15953.9.2.1) ──
     v.push("( 1.3.6.1.4.1.15953.9.2.1 NAME 'sudoRole' DESC 'Sudoer entry' SUP top STRUCTURAL MUST cn MAY ( sudoUser $ sudoHost $ sudoCommand $ sudoRunAsUser $ sudoRunAsGroup $ sudoOption $ sudoOrder $ sudoNotBefore $ sudoNotAfter $ description ) )".into());

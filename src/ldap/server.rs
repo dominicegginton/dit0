@@ -13,11 +13,13 @@ use crate::audit;
 use crate::config::Config;
 use crate::tailscale::Tailscale;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_client(
     socket: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     addr: std::net::SocketAddr,
     env: Arc<Environment>,
-    otp_db: Database,
+    yubikey_db: Database,
+    yubikey_validator: Arc<crate::yubikey::YubikeyValidator>,
     tailscale: Tailscale,
     config: Config,
     base_dn: String,
@@ -41,12 +43,13 @@ pub async fn handle_client(
         match msg {
             Ok(req) => {
                 let env_c = env.clone();
-                let otp_c = otp_db;
+                let yk_db_c = yubikey_db;
+                let yk_val_c = yubikey_validator.clone();
                 let ts_c = tailscale.clone();
                 let base_dn_c = base_dn.clone();
                 let peer = addr;
                 let resp =
-                    handle_request(env_c, otp_c, &base_dn_c, req, &ts_c, &config, peer).await;
+                    handle_request(env_c, yk_db_c, &yk_val_c, &base_dn_c, req, &ts_c, &config, peer).await;
                 for msg in resp {
                     if let Err(e) = framed.send(msg).await {
                         error!("Failed to send response: {}", e);
@@ -73,7 +76,7 @@ impl crate::http::server::Server for LdapServer {
 
     fn spawn(
         self,
-        handle: tokio::runtime::Handle,
+        _handle: tokio::runtime::Handle,
         certs: (
             Vec<rustls::pki_types::CertificateDer<'static>>,
             rustls::pki_types::PrivateKeyDer<'static>,
@@ -89,7 +92,8 @@ impl crate::http::server::Server for LdapServer {
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
         let env_clone = self.state.env.clone();
-        let otp_clone = self.state.otp_db; // copy
+        let yubikey_db_clone = self.state.yubikey_db;
+        let yubikey_validator_clone = self.state.yubikey_validator.clone();
         let tailscale_clone = self.state.tailscale.clone();
         let config_clone = self.state.config.clone();
         let base_dn = self.state.config.base_dn.clone();
@@ -105,7 +109,7 @@ impl crate::http::server::Server for LdapServer {
             loop {
                 match listener.accept() {
                     Ok(stream) => {
-                        let _ = stream
+                        stream
                             .set_nonblocking(true)
                             .expect("Failed to set nonblocking on tsnet stream");
 
@@ -123,7 +127,8 @@ impl crate::http::server::Server for LdapServer {
                         };
 
                         let env = env_clone.clone();
-                        let otp = otp_clone;
+                        let yubikey_db = yubikey_db_clone;
+                        let yubikey_validator = yubikey_validator_clone.clone();
                         let ts_api = tailscale_clone.clone();
                         let config = config_clone.clone();
                         let base_dn = base_dn.clone();
@@ -148,7 +153,8 @@ impl crate::http::server::Server for LdapServer {
                                     tls_stream,
                                     std::net::SocketAddr::new(peer_addr, 0),
                                     env.clone(),
-                                    otp,
+                                    yubikey_db,
+                                    yubikey_validator,
                                     ts_api,
                                     config,
                                     base_dn,

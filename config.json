@@ -6,6 +6,8 @@
   "ts_id": "T2YHuJgy2121CNTRL",
   "base_dn": "dc=T2YHuJgy2121CNTRL",
   "ts_hostname": "dit0",
-  "otp_hmac_key_file": "./otp_hmac_key",
+  "yubico_client_id": "122159",
+  "yubico_secret_key_file": "./yubico_secret_key",
+  "yubico_api_url": "https://api.yubico.com/wsapi/2.0/verify",
   "data_dir": "./data"
 }

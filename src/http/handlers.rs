@@ -3,22 +3,15 @@ use super::views::layout;
 use crate::audit;
 use crate::objects;
 use crate::tailscale::{User, UserClaims};
+use crate::yubikey;
 use axum::{
     extract::{Form, State},
     response::{Html, IntoResponse},
     Extension, Json,
 };
-use base32;
-use base64;
-use base64::Engine as _;
-use hex;
-use hmac::{Hmac, Mac};
 use lmdb::Transaction;
-use qrcode::render::svg;
-use qrcode::QrCode;
 use rand::RngExt;
 use serde::Deserialize;
-use sha2::Sha256;
 use v_htmlescape::escape_fmt;
 
 // ── Admin dashboard ──────────────────────────────────────────────────────────
@@ -29,6 +22,15 @@ pub async fn admin_dashboard(
 ) -> impl IntoResponse {
     let admin_user = claims.email.clone().unwrap_or_default();
     let base_dn = &state.config.base_dn;
+
+    let csrf_token: String = {
+        let mut rng = rand::rng();
+        (&mut rng)
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect()
+    };
 
     // Fetch data in parallel-ish (cached so fast)
     let ts_users = state
@@ -76,32 +78,76 @@ pub async fn admin_dashboard(
     for u in &ts_users {
         let uid = u.login_name.split('@').next().unwrap_or(&u.login_name);
         let dn = format!("uid={},ou=people,{}", uid, base_dn);
-        let has_otp = state.env.begin_ro_txn().ok().map_or(false, |txn| {
-            txn.get(state.otp_db, &dn.as_bytes())
+        let creds_opt: Option<objects::UserCredentials> = state.env.begin_ro_txn().ok().and_then(|txn| {
+            txn.get(state.yubikey_db, &dn.as_bytes())
                 .ok()
-                .and_then(|b| serde_json::from_slice::<objects::OtpData>(b).ok())
-                .map_or(false, |o| {
-                    o.password_hmac.is_some() && o.totp_secret.is_some()
-                })
+                .and_then(|b| serde_json::from_slice::<objects::UserCredentials>(b).ok())
         });
-        let otp_badge = if has_otp {
-            "<span style=\"color:green;\">\u{2713}</span>"
+        let keys = creds_opt.map(|c| c.keys).unwrap_or_default();
+
+        let mut keys_display = String::new();
+        if keys.is_empty() {
+            keys_display.push_str("<span style=\"color:var(--gray);font-style:italic;\">None</span>");
         } else {
-            "<span style=\"color:red;\">\u{2717}</span>"
-        };
+            keys_display.push_str("<ul style=\"list-style:none;padding:0;margin:0;\">");
+            for k in &keys {
+                let label_str = k.label.as_deref().unwrap_or("");
+                let label_fmt = if !label_str.is_empty() {
+                    format!(" ({})", escape_fmt(label_str))
+                } else {
+                    String::new()
+                };
+                keys_display.push_str(&format!(
+                    "<li style=\"margin-bottom:0.25rem;display:flex;align-items:center;gap:0.5rem;\">
+                        <code>{}</code>{}
+                        <form action=\"/admin/keys/revoke\" method=\"post\" style=\"display:inline;margin-left:auto;\" onsubmit=\"return confirm('Revoke key {} from {}?');\">
+                            <input type=\"hidden\" name=\"csrf\" value=\"{}\">
+                            <input type=\"hidden\" name=\"target_user\" value=\"{}\">
+                            <input type=\"hidden\" name=\"public_id\" value=\"{}\">
+                            <button type=\"submit\" style=\"background:#d9534f;color:white;border:none;padding:0.15rem 0.4rem;font-size:0.75rem;cursor:pointer;\">Revoke</button>
+                        </form>
+                    </li>",
+                    escape_fmt(&k.public_id),
+                    label_fmt,
+                    escape_fmt(&k.public_id),
+                    escape_fmt(uid),
+                    csrf_token,
+                    escape_fmt(uid),
+                    escape_fmt(&k.public_id)
+                ));
+            }
+            keys_display.push_str("</ul>");
+        }
+
+        let action_form = format!(
+            "<details>
+                <summary style=\"cursor:pointer;font-size:0.85rem;color:var(--link);\">+ Add Key</summary>
+                <form action=\"/admin/keys/register\" method=\"post\" style=\"margin-top:0.5rem;display:flex;flex-direction:column;gap:0.3rem;\">
+                    <input type=\"hidden\" name=\"csrf\" value=\"{}\">
+                    <input type=\"hidden\" name=\"target_user\" value=\"{}\">
+                    <input type=\"text\" name=\"label\" placeholder=\"Label (optional)\" style=\"padding:0.25rem 0.4rem;font-size:0.8rem;\">
+                    <input type=\"password\" name=\"otp\" placeholder=\"Touch YubiKey here\" required autocomplete=\"off\" style=\"padding:0.25rem 0.4rem;font-size:0.8rem;font-family:monospace;\">
+                    <button type=\"submit\" style=\"padding:0.25rem 0.5rem;cursor:pointer;font-size:0.8rem;\">Register</button>
+                </form>
+            </details>",
+            csrf_token,
+            escape_fmt(uid)
+        );
+
         users_rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td style=\"min-width:240px;\">{}</td><td style=\"min-width:180px;\">{}</td></tr>",
             escape_fmt(uid),
             escape_fmt(&u.login_name),
             escape_fmt(&u.role),
             escape_fmt(&u.status),
-            otp_badge
+            keys_display,
+            action_form
         ));
     }
     let users_table = format!(
         r#"<h2>Users</h2>
         <table>
-            <thead><tr><th>UID</th><th>Login</th><th>Role</th><th>Status</th><th>OTP</th></tr></thead>
+            <thead><tr><th>UID</th><th>Login</th><th>Role</th><th>Status</th><th>Registered YubiKeys</th><th>Actions</th></tr></thead>
             <tbody>{}</tbody>
         </table>"#,
         users_rows
@@ -657,7 +703,16 @@ pub async fn admin_dashboard(
         ldap_summary
     );
 
-    Html(super::views::base_layout("Admin Dashboard", &body)).into_response()
+    let set_cookie = format!("tsdit_csrf={}; Path=/; Secure; SameSite=Strict", csrf_token);
+    (
+        [
+            ("Set-Cookie", set_cookie.as_str()),
+            ("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://d3js.org"),
+            ("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"),
+        ],
+        Html(super::views::base_layout("Admin Dashboard", &body)),
+    )
+        .into_response()
 }
 
 /// JSON API: return all audit events so D3 charts can fetch data.
@@ -669,12 +724,14 @@ pub async fn admin_audit_api(State(state): State<AppState>) -> impl IntoResponse
 #[derive(Deserialize)]
 pub struct SetupForm {
     pub csrf: Option<String>,
-    pub password: Option<String>,
+    pub otp: Option<String>,
+    pub label: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ResetForm {
     pub csrf: Option<String>,
+    pub public_id: Option<String>,
 }
 
 fn verify_csrf(cookie: &str, form_csrf: Option<&String>) -> Result<(), Html<String>> {
@@ -700,42 +757,92 @@ async fn render_profile(state: &AppState, user: &User, csrf_token: Option<&str>)
     let base_dn = &state.config.base_dn;
     let dn = format!("uid={},ou=people,{}", username, base_dn);
 
-    let otp_opt: Option<objects::OtpData> = state.env.begin_ro_txn().ok().and_then(|txn| {
-        txn.get(state.otp_db, &dn.as_bytes())
+    let creds_opt: Option<objects::UserCredentials> = state.env.begin_ro_txn().ok().and_then(|txn| {
+        txn.get(state.yubikey_db, &dn.as_bytes())
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<objects::OtpData>(bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<objects::UserCredentials>(bytes).ok())
     });
 
-    let is_configured = otp_opt
-        .as_ref()
-        .map(|o| o.password_hmac.is_some() && o.totp_secret.is_some())
-        .unwrap_or(false);
-
+    let keys = creds_opt.map(|c| c.keys).unwrap_or_default();
     let csrf = csrf_token.unwrap_or("");
 
-    let body = if is_configured {
+    let keys_table = if !keys.is_empty() {
+        let mut rows = String::new();
+        for key in &keys {
+            let label = key.label.as_deref().unwrap_or("—");
+            let reg_date = chrono::DateTime::from_timestamp(key.registered_at as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            rows.push_str(&format!(
+                r#"<tr>
+                    <td><code>{}</code></td>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>
+                        <form action="/credentials/reset" method="post" style="display:inline;" onsubmit="return confirm('Revoke this YubiKey?');">
+                            <input type="hidden" name="csrf" value="{}">
+                            <input type="hidden" name="public_id" value="{}">
+                            <button type="submit" style="background:#d9534f;color:white;border:none;padding:0.25rem 0.5rem;cursor:pointer;">Revoke</button>
+                        </form>
+                    </td>
+                </tr>"#,
+                escape_fmt(&key.public_id),
+                escape_fmt(label),
+                escape_fmt(&reg_date),
+                csrf,
+                escape_fmt(&key.public_id)
+            ));
+        }
+
         format!(
-            r#"<p>Your password and TOTP are configured for LDAP authentication.</p>
-            <p>When logging in to LDAP-bound devices, enter your password and 6-digit TOTP code separated by <code>::</code></p>
-            <p>For example: <code>mypassword::123456</code></p>
-            <form action="/credentials/reset" method="post" style="margin-top: 1rem;" onsubmit="return confirm('This will remove your current password and TOTP. You will need to set them up again.')">
-                <input type="hidden" name="csrf" value="{}">
-                <button type="submit">Reset Credentials</button>
-            </form>"#,
-            csrf
+            r#"<h4>Registered YubiKeys</h4>
+            <table style="width:100%;margin-bottom:1.5rem;">
+                <thead>
+                    <tr><th>Public ID</th><th>Label</th><th>Registered At</th><th>Action</th></tr>
+                </thead>
+                <tbody>{}</tbody>
+            </table>"#,
+            rows
         )
     } else {
-        format!(
-            r#"<p>Set a password to configure LDAP authentication. A TOTP secret will be generated automatically.</p>
-            <form action="/credentials/setup" method="post" style="margin-top: 1rem;">
-                <input type="hidden" name="csrf" value="{}">
-                <label for="password">Password:</label>
-                <input type="password" name="password" id="password" required>
-                <button type="submit">Setup Credentials</button>
-            </form>"#,
-            csrf
-        )
+        r#"<p style="margin-bottom:1rem;color:var(--gray);">No YubiKeys registered yet. Register a key below to enable LDAP client authentication.</p>"#.to_string()
     };
+
+    let tailnet_id = if !user.tailnet_id.is_empty() {
+        &user.tailnet_id
+    } else {
+        "N/A"
+    };
+
+    let body = format!(
+        r#"<div style="background:var(--light-gray);padding:1rem;border:1px solid var(--text);margin-bottom:1.5rem;">
+            <strong>LDAP Login Instructions</strong>
+            <p style="margin-top:0.5rem;">When logging into LDAP-bound machines or clients, use your <strong>Tailnet ID</strong> (or UID/email) as your username:</p>
+            <p style="margin-top:0.25rem;"><strong>Tailnet ID:</strong> <code>{}</code> | <strong>UID:</strong> <code>{}</code></p>
+            <p style="margin-top:0.5rem;">When prompted for a password, simply <strong>touch your registered YubiKey</strong>.</p>
+        </div>
+
+        {}
+
+        <h4>Register a New YubiKey</h4>
+        <form action="/credentials/setup" method="post" style="margin-top: 1rem; display:flex; flex-direction:column; gap:0.75rem;">
+            <input type="hidden" name="csrf" value="{}">
+            <div>
+                <label for="label" style="display:block;margin-bottom:0.25rem;">Key Label (optional):</label>
+                <input type="text" name="label" id="label" placeholder="e.g. Primary YubiKey 5C" style="width:100%;padding:0.5rem;">
+            </div>
+            <div>
+                <label for="otp" style="display:block;margin-bottom:0.25rem;">YubiKey OTP (touch your key):</label>
+                <input type="password" name="otp" id="otp" required autocomplete="off" autofocus placeholder="Insert YubiKey and press its button" style="width:100%;padding:0.5rem;font-family:monospace;">
+            </div>
+            <button type="submit" style="padding:0.6rem 1.2rem;cursor:pointer;font-weight:bold;">Register YubiKey</button>
+        </form>"#,
+        escape_fmt(tailnet_id),
+        escape_fmt(username),
+        keys_table,
+        csrf
+    );
 
     super::views::base_layout(
         &format!(
@@ -750,7 +857,7 @@ async fn render_profile(state: &AppState, user: &User, csrf_token: Option<&str>)
                 <a href="/admin">Admin</a>
             </header>
             <div class="main-content">
-            <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
+            <div style="max-width: 650px; margin: 2rem auto; padding: 2rem;">
                 <div style="display: flex; align-items: center; margin-bottom: 1rem;">
                     <img src="{}" width="64" height="64" style="border-radius: 50%; margin-right: 1rem;">
                     <div>
@@ -758,7 +865,7 @@ async fn render_profile(state: &AppState, user: &User, csrf_token: Option<&str>)
                         <p>{}</p>
                     </div>
                 </div>
-                <h3>LDAP Credentials</h3>
+                <h3>YubiKey Authentication</h3>
                 {}
             </div>
             </div>
@@ -843,82 +950,63 @@ pub async fn credentials_setup(
     let base_dn = &state.config.base_dn;
     let dn = format!("uid={},ou=people,{}", username, base_dn);
 
-    let password_plain = form
-        .password
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if password_plain.is_empty() {
-        audit::credentials_rejected(&username, "empty password");
-        return Html(layout("Error", "<h1>Password required</h1>")).into_response();
-    }
-
-    // Password complexity: minimum 8 characters, at least one uppercase,
-    // one lowercase, and one digit.
-    if password_plain.len() < 8
-        || !password_plain.chars().any(|c| c.is_ascii_uppercase())
-        || !password_plain.chars().any(|c| c.is_ascii_lowercase())
-        || !password_plain.chars().any(|c| c.is_ascii_digit())
-    {
-        audit::credentials_rejected(&username, "password too weak");
+    let otp = form.otp.as_deref().unwrap_or("").trim();
+    if !yubikey::is_valid_otp(otp) {
+        audit::credentials_rejected(&username, "invalid YubiKey OTP format");
         return Html(layout(
             "Error",
-            "<h1>Password too weak</h1><p>Password must be at least 8 characters and include an uppercase letter, a lowercase letter, and a digit.</p>",
+            "<h1>Invalid YubiKey OTP</h1><p>Please touch your YubiKey into the input field to generate a valid 44-character OTP.</p><p><a href=\"/\">Back to Profile</a></p>",
         ))
         .into_response();
     }
 
-    // Check if already configured
-    if let Ok(txn) = state.env.begin_ro_txn() {
-        if let Ok(bytes) = txn.get(state.otp_db, &dn.as_bytes()) {
-            if let Ok(existing) = serde_json::from_slice::<objects::OtpData>(bytes) {
-                if existing.password_hmac.is_some() && existing.totp_secret.is_some() {
-                    audit::credentials_rejected(&username, "already configured");
-                    return Html(layout(
-                        "Error",
-                        "<h1>Credentials already configured</h1><p>Reset your existing credentials first.</p>",
-                    ))
-                    .into_response();
-                }
-            }
-        }
+    let public_id = yubikey::extract_public_id(otp).unwrap();
+
+    // Verify OTP with YubiCloud / Validation server
+    if let Err(e) = state.yubikey_validator.verify_otp(otp).await {
+        audit::credentials_rejected(&username, &format!("YubiKey OTP validation failed: {}", e));
+        return Html(layout(
+            "Error",
+            &format!(
+                "<h1>YubiKey Validation Failed</h1><p>The OTP could not be verified: {}</p><p><a href=\"/\">Back to Profile</a></p>",
+                escape_fmt(&e.to_string())
+            ),
+        ))
+        .into_response();
     }
-
-    // Hash the password
-    let hmac_key = match state.config.otp_hmac_key() {
-        Some(k) if !k.is_empty() => k,
-        _ => {
-            tracing::error!("OTP_HMAC_KEY not configured");
-            return Html(layout("Error", "<h1>Server misconfiguration</h1>")).into_response();
-        }
-    };
-    let mut mac: Hmac<Sha256> =
-        Hmac::new_from_slice(hmac_key.as_bytes()).expect("HMAC can take key of any size");
-    mac.update(password_plain.as_bytes());
-    let password_hashed = hex::encode(mac.finalize().into_bytes());
-
-    // Generate TOTP secret
-    let mut secret_bytes = [0u8; 20];
-    let mut rng = rand::rng();
-    rng.fill(&mut secret_bytes);
-    let secret_b32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
 
-    let otp_data = objects::OtpData {
-        status: "configured".to_string(),
-        code: None,
-        expiry: None,
-        requested_at: now,
-        device_info: None,
-        totp_secret: Some(secret_b32.clone()),
-        password_hmac: Some(password_hashed),
-    };
+    let mut creds: objects::UserCredentials = state
+        .env
+        .begin_ro_txn()
+        .ok()
+        .and_then(|txn| {
+            txn.get(state.yubikey_db, &dn.as_bytes())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        })
+        .unwrap_or_default();
 
-    let val = match serde_json::to_vec(&otp_data) {
+    if creds.keys.iter().any(|k| k.public_id == public_id) {
+        audit::credentials_rejected(&username, "YubiKey already registered");
+        return Html(layout(
+            "Info",
+            "<h1>YubiKey Already Registered</h1><p>This YubiKey is already registered to your account.</p><p><a href=\"/\">Back to Profile</a></p>",
+        ))
+        .into_response();
+    }
+
+    creds.keys.push(objects::YubikeyCredential {
+        public_id: public_id.to_string(),
+        label: form.label.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        registered_at: now,
+    });
+
+    let val = match serde_json::to_vec(&creds) {
         Ok(v) => v,
         Err(_) => return Html(layout("Error", "<h1>Internal error</h1>")).into_response(),
     };
@@ -927,16 +1015,15 @@ pub async fn credentials_setup(
     if let Ok(mut txn) = state.env.begin_rw_txn() {
         if txn
             .put(
-                state.otp_db,
+                state.yubikey_db,
                 &dn.as_bytes(),
                 &val,
                 ::lmdb::WriteFlags::empty(),
             )
             .is_ok()
+            && txn.commit().is_ok()
         {
-            if txn.commit().is_ok() {
-                saved = true;
-            }
+            saved = true;
         }
     }
 
@@ -945,58 +1032,23 @@ pub async fn credentials_setup(
         return Html(layout("Error", "<h1>Failed to save credentials</h1>")).into_response();
     }
 
-    audit::credentials_setup(&username, &dn);
+    audit::yubikey_registered(&username, public_id);
 
-    // Build QR code
-    let otpauth = format!(
-        "otpauth://totp/DIT:{}?secret={}&issuer=dit0&period=30&digits=6",
-        username, secret_b32
-    );
-    let qr_data_uri = match QrCode::new(otpauth.as_bytes()) {
-        Ok(code) => {
-            let svg_str = code.render::<svg::Color>().min_dimensions(200, 200).build();
-            let b64 = base64::engine::general_purpose::STANDARD.encode(svg_str.as_bytes());
-            format!("data:image/svg+xml;base64,{}", b64)
-        }
-        Err(_) => String::new(),
-    };
-
-    let qr_html = if !qr_data_uri.is_empty() {
-        format!(
-            r#"<div style="text-align:center; margin: 1rem 0;"><img src="{}" alt="TOTP QR"></div>"#,
-            qr_data_uri
-        )
-    } else {
-        String::new()
-    };
-
-    // Return with Cache-Control: no-store to prevent browsers/proxies caching
-    // the page that contains the plaintext TOTP secret.
-    (
-        [
-            ("Cache-Control", "no-store, no-cache, must-revalidate"),
-            ("Pragma", "no-cache"),
-        ],
-        Html(layout(
-            "Credentials Configured",
-            &format!(
-                r#"
-                <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
-                    <h2>Credentials Configured</h2>
-                    <p>Your password has been saved and a TOTP secret has been generated.</p>
-                    <p>Scan this QR code in your authenticator app, or enter the secret manually:</p>
-                    {}
-                    <div style="background: var(--light-gray); padding: 1rem; font-family: monospace; font-size: 1rem; text-align: center; border: 1px solid var(--text); margin: 1rem 0;">{}</div>
-                    <p>When logging in via LDAP, enter your password and 6-digit TOTP separated by <code>::</code></p>
-                    <p>For example: <code>mypassword::123456</code></p>
-                    <a href="/">Back to Profile</a>
-                </div>
-                "#,
-                qr_html, secret_b32
-            ),
-        )),
-    )
-        .into_response()
+    Html(layout(
+        "YubiKey Registered",
+        &format!(
+            r#"
+            <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
+                <h2>YubiKey Registered Successfully</h2>
+                <p>Your YubiKey (Public ID: <code>{}</code>) is now registered for LDAP authentication.</p>
+                <p>You can now use your Tailnet ID and touch this YubiKey to log into LDAP clients.</p>
+                <p style="margin-top: 1.5rem;"><a href="/">Back to Profile</a></p>
+            </div>
+            "#,
+            escape_fmt(public_id)
+        ),
+    ))
+    .into_response()
 }
 
 #[axum::debug_handler]
@@ -1019,28 +1071,308 @@ pub async fn credentials_reset(
     let base_dn = &state.config.base_dn;
     let dn = format!("uid={},ou=people,{}", username, base_dn);
 
+    let mut creds: objects::UserCredentials = state
+        .env
+        .begin_ro_txn()
+        .ok()
+        .and_then(|txn| {
+            txn.get(state.yubikey_db, &dn.as_bytes())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        })
+        .unwrap_or_default();
+
+    let target_id = form.public_id.as_deref().unwrap_or("").trim();
     let mut done = false;
-    if let Ok(mut txn) = state.env.begin_rw_txn() {
-        if txn.del(state.otp_db, &dn.as_bytes(), None).is_ok() {
+
+    if target_id.is_empty() {
+        // Revoke all
+        if let Ok(mut txn) = state.env.begin_rw_txn() {
+            let _ = txn.del(state.yubikey_db, &dn.as_bytes(), None);
             if txn.commit().is_ok() {
                 done = true;
             }
         }
+        if done {
+            audit::yubikey_revoked(&username, "all");
+        }
+    } else {
+        // Revoke specific key
+        creds.keys.retain(|k| k.public_id != target_id);
+        if let Ok(mut txn) = state.env.begin_rw_txn() {
+            if creds.keys.is_empty() {
+                let _ = txn.del(state.yubikey_db, &dn.as_bytes(), None);
+            } else if let Ok(val) = serde_json::to_vec(&creds) {
+                let _ = txn.put(
+                    state.yubikey_db,
+                    &dn.as_bytes(),
+                    &val,
+                    ::lmdb::WriteFlags::empty(),
+                );
+            }
+            if txn.commit().is_ok() {
+                done = true;
+            }
+        }
+        if done {
+            audit::yubikey_revoked(&username, target_id);
+        }
     }
 
     if done {
-        audit::credentials_reset(&username, &dn);
         Html(layout(
-            "Credentials Reset",
+            "YubiKey Revoked",
             r#"<div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
-                <h2>Credentials Reset</h2>
-                <p>Your password and TOTP have been removed. You can set up new credentials from your profile.</p>
-                <a href="/">Back to Profile</a>
+                <h2>YubiKey Revoked</h2>
+                <p>The specified YubiKey credential has been removed.</p>
+                <p style="margin-top: 1.5rem;"><a href="/">Back to Profile</a></p>
             </div>"#,
         ))
         .into_response()
     } else {
-        audit::credentials_rejected(&username, "reset failed – database error");
-        Html(layout("Error", "<h1>Failed to reset credentials</h1>")).into_response()
+        audit::credentials_rejected(&username, "revocation failed – database error");
+        Html(layout("Error", "<h1>Failed to revoke YubiKey</h1>")).into_response()
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AdminKeyRegisterForm {
+    pub csrf: Option<String>,
+    pub target_user: Option<String>,
+    pub otp: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AdminKeyRevokeForm {
+    pub csrf: Option<String>,
+    pub target_user: Option<String>,
+    pub public_id: Option<String>,
+}
+
+#[axum::debug_handler]
+pub async fn admin_key_register(
+    State(state): State<AppState>,
+    Extension(claims): Extension<UserClaims>,
+    Extension(cookie): Extension<String>,
+    Form(form): Form<AdminKeyRegisterForm>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_csrf(&cookie, form.csrf.as_ref()) {
+        return e.into_response();
+    }
+
+    let admin_user = claims.email.clone().unwrap_or_else(|| "admin".to_string());
+    let target_user = form
+        .target_user
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+    if target_user.is_empty() {
+        audit::credentials_rejected(&admin_user, "missing target user for key registration");
+        return Html(layout("Error", "<h1>Target user required</h1>")).into_response();
+    }
+    let username = target_user.split('@').next().unwrap_or(target_user).to_string();
+    let base_dn = &state.config.base_dn;
+    let dn = format!("uid={},ou=people,{}", username, base_dn);
+
+    let otp = form.otp.as_deref().unwrap_or("").trim();
+    if !yubikey::is_valid_otp(otp) {
+        audit::credentials_rejected(&admin_user, &format!("invalid YubiKey OTP for {}", username));
+        return Html(layout(
+            "Error",
+            "<h1>Invalid YubiKey OTP</h1><p>Please touch a valid YubiKey into the input field.</p><p><a href=\"/admin\">Back to Admin</a></p>",
+        ))
+        .into_response();
+    }
+
+    let public_id = yubikey::extract_public_id(otp).unwrap();
+
+    // Verify OTP with YubiCloud / Validation server
+    if let Err(e) = state.yubikey_validator.verify_otp(otp).await {
+        audit::credentials_rejected(
+            &admin_user,
+            &format!("YubiKey validation failed for {}: {}", username, e),
+        );
+        return Html(layout(
+            "Error",
+            &format!(
+                "<h1>YubiKey Validation Failed</h1><p>The OTP could not be verified: {}</p><p><a href=\"/admin\">Back to Admin</a></p>",
+                escape_fmt(&e.to_string())
+            ),
+        ))
+        .into_response();
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut creds: objects::UserCredentials = state
+        .env
+        .begin_ro_txn()
+        .ok()
+        .and_then(|txn| {
+            txn.get(state.yubikey_db, &dn.as_bytes())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        })
+        .unwrap_or_default();
+
+    if creds.keys.iter().any(|k| k.public_id == public_id) {
+        audit::credentials_rejected(
+            &admin_user,
+            &format!("YubiKey already registered to {}", username),
+        );
+        return Html(layout(
+            "Info",
+            &format!(
+                "<h1>YubiKey Already Registered</h1><p>This YubiKey is already registered for user <code>{}</code>.</p><p><a href=\"/admin\">Back to Admin</a></p>",
+                escape_fmt(&username)
+            ),
+        ))
+        .into_response();
+    }
+
+    creds.keys.push(objects::YubikeyCredential {
+        public_id: public_id.to_string(),
+        label: form.label.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        registered_at: now,
+    });
+
+    let val = match serde_json::to_vec(&creds) {
+        Ok(v) => v,
+        Err(_) => return Html(layout("Error", "<h1>Internal error</h1>")).into_response(),
+    };
+
+    let mut saved = false;
+    if let Ok(mut txn) = state.env.begin_rw_txn() {
+        if txn
+            .put(
+                state.yubikey_db,
+                &dn.as_bytes(),
+                &val,
+                ::lmdb::WriteFlags::empty(),
+            )
+            .is_ok()
+            && txn.commit().is_ok()
+        {
+            saved = true;
+        }
+    }
+
+    if !saved {
+        audit::credentials_rejected(&admin_user, "database write failed");
+        return Html(layout("Error", "<h1>Failed to save credentials</h1>")).into_response();
+    }
+
+    audit::admin_yubikey_registered(&admin_user, &username, public_id);
+
+    Html(layout(
+        "YubiKey Registered",
+        &format!(
+            r#"
+            <div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
+                <h2>YubiKey Registered for User</h2>
+                <p>YubiKey (Public ID: <code>{}</code>) was successfully registered for user <strong>{}</strong>.</p>
+                <p style="margin-top: 1.5rem;"><a href="/admin">Back to Admin</a></p>
+            </div>
+            "#,
+            escape_fmt(public_id),
+            escape_fmt(&username)
+        ),
+    ))
+    .into_response()
+}
+
+#[axum::debug_handler]
+pub async fn admin_key_revoke(
+    State(state): State<AppState>,
+    Extension(claims): Extension<UserClaims>,
+    Extension(cookie): Extension<String>,
+    Form(form): Form<AdminKeyRevokeForm>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_csrf(&cookie, form.csrf.as_ref()) {
+        return e.into_response();
+    }
+
+    let admin_user = claims.email.clone().unwrap_or_else(|| "admin".to_string());
+    let target_user = form
+        .target_user
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+    if target_user.is_empty() {
+        audit::credentials_rejected(&admin_user, "missing target user for key revocation");
+        return Html(layout("Error", "<h1>Target user required</h1>")).into_response();
+    }
+    let username = target_user.split('@').next().unwrap_or(target_user).to_string();
+    let base_dn = &state.config.base_dn;
+    let dn = format!("uid={},ou=people,{}", username, base_dn);
+
+    let mut creds: objects::UserCredentials = state
+        .env
+        .begin_ro_txn()
+        .ok()
+        .and_then(|txn| {
+            txn.get(state.yubikey_db, &dn.as_bytes())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        })
+        .unwrap_or_default();
+
+    let target_id = form.public_id.as_deref().unwrap_or("").trim();
+    let mut done = false;
+
+    if target_id.is_empty() {
+        // Revoke all keys for user
+        if let Ok(mut txn) = state.env.begin_rw_txn() {
+            let _ = txn.del(state.yubikey_db, &dn.as_bytes(), None);
+            if txn.commit().is_ok() {
+                done = true;
+            }
+        }
+        if done {
+            audit::admin_yubikey_revoked(&admin_user, &username, "all");
+        }
+    } else {
+        // Revoke specific key
+        creds.keys.retain(|k| k.public_id != target_id);
+        if let Ok(mut txn) = state.env.begin_rw_txn() {
+            if creds.keys.is_empty() {
+                let _ = txn.del(state.yubikey_db, &dn.as_bytes(), None);
+            } else if let Ok(val) = serde_json::to_vec(&creds) {
+                let _ = txn.put(
+                    state.yubikey_db,
+                    &dn.as_bytes(),
+                    &val,
+                    ::lmdb::WriteFlags::empty(),
+                );
+            }
+            if txn.commit().is_ok() {
+                done = true;
+            }
+        }
+        if done {
+            audit::admin_yubikey_revoked(&admin_user, &username, target_id);
+        }
+    }
+
+    if done {
+        Html(layout(
+            "YubiKey Revoked",
+            &format!(
+                r#"<div style="max-width: 600px; margin: 2rem auto; padding: 2rem;">
+                    <h2>YubiKey Revoked</h2>
+                    <p>YubiKey credentials have been revoked for user <strong>{}</strong>.</p>
+                    <p style="margin-top: 1.5rem;"><a href="/admin">Back to Admin</a></p>
+                </div>"#,
+                escape_fmt(&username)
+            ),
+        ))
+        .into_response()
+    } else {
+        audit::credentials_rejected(&admin_user, &format!("failed to revoke key for {}", username));
+        Html(layout("Error", "<h1>Failed to revoke YubiKey</h1>")).into_response()
     }
 }

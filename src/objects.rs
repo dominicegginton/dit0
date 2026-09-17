@@ -3,27 +3,22 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
-pub struct OtpData {
-    // "pending" | "approved"
-    pub status: String,
-    // Present only when approved
-    pub code: Option<String>,
-    // Unix seconds expiry (present when approved)
-    pub expiry: Option<u64>,
-    // TOTP shared secret (base32)
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct YubikeyCredential {
+    pub public_id: String,
     #[serde(default)]
-    pub totp_secret: Option<String>,
-    // HMAC of the user's chosen static password (stored so we can verify password::TOTP)
+    pub label: Option<String>,
+    pub registered_at: u64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct UserCredentials {
     #[serde(default)]
-    pub password_hmac: Option<String>,
-    // Request timestamp (unix seconds)
-    pub requested_at: u64,
-    // Optional device info / request metadata
-    pub device_info: Option<String>,
+    pub keys: Vec<YubikeyCredential>,
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct AclPolicy {
     #[serde(default)]
     groups: HashMap<String, Vec<String>>,
@@ -36,6 +31,7 @@ struct AclPolicy {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct AclRule {
     #[serde(default)]
     action: String,
@@ -340,7 +336,7 @@ pub async fn get_all_entries(
         // Default attributes
         attrs
             .entry("objectClass".to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .extend(vec![
                 "top".to_string(),
                 "person".to_string(),
@@ -487,7 +483,7 @@ pub async fn get_all_entries(
 
         group_attrs
             .entry("objectClass".to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .extend(vec!["top".to_string(), "posixGroup".to_string()]);
         if let Some(ocs) = group_attrs.get_mut("objectClass") {
             ocs.sort();
@@ -502,13 +498,14 @@ pub async fn get_all_entries(
         // Add memberUid
         group_attrs
             .entry("memberUid".to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(uid.clone());
     }
 
     entries_map
 }
 
+#[allow(dead_code)]
 pub async fn get_user_profile(
     tailscale: &Tailscale,
     base_dn: &str,

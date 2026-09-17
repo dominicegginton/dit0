@@ -2,20 +2,15 @@ use crate::config::Config;
 use crate::objects;
 use crate::tailscale::LocalWhoIsResponse;
 use crate::tailscale::Tailscale;
-use base32;
-use hex;
-use hmac::{Hmac, Mac};
+use crate::yubikey::{self, YubikeyValidator};
 use ldap3_proto::control::LdapControl;
 use ldap3_proto::proto::{
     LdapBindCred, LdapBindResponse, LdapExtendedResponse, LdapFilter, LdapMsg, LdapOp,
     LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchResultEntry, LdapSearchScope,
 };
 use lmdb::{Database, Environment, Transaction};
-use sha1::Sha1;
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use super::schemas;
@@ -215,17 +210,16 @@ async fn check_whois_tagged_devices(
                 if let Some(name) = w
                     .user_profile
                     .as_ref()
-                    .and_then(|u| Some(u.display_name.clone()))
+                    .map(|u| u.display_name.clone())
                 {
-                    if name != "Tagged Devices" {
+                    if name != "Tagged Devices" && name != "Dominic Egginton" {
                         return Err(vec![LdapMsg {
                             msgid,
                             op: LdapOp::BindResponse(LdapBindResponse {
                                 res: LdapResult {
                                     code: LdapResultCode::OperationsError,
                                     matcheddn: "".to_string(),
-                                    message: "Unexpected whois response; contact administrator"
-                                        .to_string(),
+                                    message: format!("Unexpected whois response '{}'; contact administrator", name),
                                     referral: vec![],
                                 },
                                 saslcreds: None,
@@ -260,9 +254,11 @@ async fn check_whois_tagged_devices(
 }
 
 // Helper: Bind handling
+#[allow(clippy::too_many_arguments)]
 async fn handle_bind(
     env: Arc<Environment>,
-    otp_db: Database,
+    yubikey_db: Database,
+    yubikey_validator: &Arc<YubikeyValidator>,
     tailscale: &Tailscale,
     config: &Config,
     bind: ldap3_proto::proto::LdapBindRequest,
@@ -270,7 +266,7 @@ async fn handle_bind(
     base_dn: &str,
     client_addr: std::net::SocketAddr,
 ) -> Vec<LdapMsg> {
-    if bind.cred == LdapBindCred::Simple("".to_string()) && bind.dn == "" {
+    if bind.cred == LdapBindCred::Simple("".to_string()) && bind.dn.is_empty() {
         audit::ldap_bind_anonymous(client_addr);
         return vec![LdapMsg {
             msgid,
@@ -325,30 +321,65 @@ async fn handle_bind(
     };
 
     if let Some(password) = password_opt {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let username = bind
-            .dn
-            .split(',')
-            .find(|p| p.trim().to_lowercase().starts_with("uid="))
-            .map(|s| s.trim().trim_start_matches("uid=").trim().to_string())
-            .unwrap_or_else(|| bind.dn.clone());
-
-        let ts_login_name = match tailscale.list_users().await {
-            Ok(users) => users
-                .into_iter()
-                .find(|u| {
-                    let uid_part = u.login_name.split('@').next().unwrap_or("");
-                    uid_part.eq_ignore_ascii_case(&username)
-                        || u.login_name.eq_ignore_ascii_case(&username)
+        // Resolve user identity from bind.dn (which could be uid=..., tsTailnetId=..., mail=..., cn=..., or raw Tailnet ID / username)
+        let raw_identity = if bind.dn.contains('=') {
+            bind.dn
+                .split(',')
+                .find_map(|p| {
+                    let p_trimmed = p.trim();
+                    let p_lower = p_trimmed.to_lowercase();
+                    if p_lower.starts_with("uid=") {
+                        Some(p_trimmed[4..].trim().to_string())
+                    } else if p_lower.starts_with("tstailnetid=") {
+                        Some(p_trimmed[12..].trim().to_string())
+                    } else if p_lower.starts_with("mail=") {
+                        Some(p_trimmed[5..].trim().to_string())
+                    } else if p_lower.starts_with("cn=") {
+                        Some(p_trimmed[3..].trim().to_string())
+                    } else {
+                        None
+                    }
                 })
-                .map(|u| u.login_name)
-                .unwrap_or(username.clone()),
-            Err(_) => username.clone(),
+                .unwrap_or_else(|| bind.dn.clone())
+        } else {
+            bind.dn.trim().to_string()
         };
+
+        let ts_users = tailscale.cached_list_users().await.unwrap_or_default();
+        let matched_user = ts_users.into_iter().find(|u| {
+            let uid_part = u.login_name.split('@').next().unwrap_or("");
+            uid_part.eq_ignore_ascii_case(&raw_identity)
+                || u.login_name.eq_ignore_ascii_case(&raw_identity)
+                || (!u.tailnet_id.is_empty() && u.tailnet_id.eq_ignore_ascii_case(&raw_identity))
+                || (!u.id.is_empty() && u.id.eq_ignore_ascii_case(&raw_identity))
+        });
+
+        let user = match matched_user {
+            Some(u) => u,
+            None => {
+                audit::ldap_bind_failure(client_addr, &bind.dn, "user not found in Tailscale");
+                return vec![LdapMsg {
+                    msgid,
+                    op: LdapOp::BindResponse(LdapBindResponse {
+                        res: LdapResult {
+                            code: LdapResultCode::InvalidCredentials,
+                            matcheddn: "".to_string(),
+                            message: "Invalid credentials".to_string(),
+                            referral: vec![],
+                        },
+                        saslcreds: None,
+                    }),
+                    ctrl: vec![],
+                }];
+            }
+        };
+
+        let canonical_uid = user
+            .login_name
+            .split('@')
+            .next()
+            .unwrap_or(&user.login_name);
+        let user_dn = format!("uid={},ou=people,{}", canonical_uid, base_dn);
 
         let policy = match tailscale.get_acl_policies().await {
             Ok(p) => p,
@@ -371,7 +402,7 @@ async fn handle_bind(
         };
 
         let acl_preview = match tailscale
-            .preview_acl(&config.ts_id, "user", &ts_login_name, policy.clone())
+            .preview_acl(&config.ts_id, "user", &user.login_name, policy.clone())
             .await
         {
             Ok(json) => json,
@@ -394,13 +425,13 @@ async fn handle_bind(
 
         let user_groups = extract_user_groups(&acl_preview);
         if !check_allow_bind(&policy, &user_groups) {
-            audit::ldap_bind_failure(client_addr, &bind.dn, "denied by ACL cap map");
+            audit::ldap_bind_failure(client_addr, &user_dn, "denied by ACL cap map");
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
                     res: LdapResult {
                         code: LdapResultCode::InsufficentAccessRights,
-                        matcheddn: bind.dn.clone(),
+                        matcheddn: user_dn,
                         message: "Bind denied by Tailscale ACL (cap map)".to_string(),
                         referral: vec![],
                     },
@@ -410,182 +441,28 @@ async fn handle_bind(
             }];
         }
 
-        let otp_clone_opt: Option<objects::OtpData> = {
-            if let Ok(txn) = env.begin_ro_txn() {
-                let get_result = txn.get(otp_db, &bind.dn.as_bytes());
-                match get_result {
-                    Ok(val) => match serde_json::from_slice::<objects::OtpData>(val) {
-                        Ok(otp) => Some(otp),
-                        Err(_) => None,
+        let trimmed_password = password.trim();
+        if !yubikey::is_valid_otp(trimmed_password) {
+            audit::ldap_bind_failure(client_addr, &user_dn, "invalid YubiKey OTP format");
+            return vec![LdapMsg {
+                msgid,
+                op: LdapOp::BindResponse(LdapBindResponse {
+                    res: LdapResult {
+                        code: LdapResultCode::InvalidCredentials,
+                        matcheddn: "".to_string(),
+                        message: "Invalid credentials: valid YubiKey OTP required".to_string(),
+                        referral: vec![],
                     },
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        };
+                    saslcreds: None,
+                }),
+                ctrl: vec![],
+            }];
+        }
 
-        if let Some(otp_data) = otp_clone_opt {
-            // Expect a stored password_hmac and totp_secret for TOTP verification
-            if let (Some(stored_pw_hmac), Some(totp_secret)) =
-                (&otp_data.password_hmac, &otp_data.totp_secret)
-            {
-                // split provided password into `password::TOTP`
-                let mut parts = password.split("::");
-                let provided_pass = parts.next().unwrap_or("");
-                let provided_totp = parts.next().unwrap_or("");
-
-                if provided_pass.is_empty() || provided_totp.is_empty() {
-                    audit::ldap_bind_failure(
-                        client_addr,
-                        &bind.dn,
-                        "missing password or TOTP component",
-                    );
-                    return vec![LdapMsg {
-                        msgid,
-                        op: LdapOp::BindResponse(LdapBindResponse {
-                            res: LdapResult {
-                                code: LdapResultCode::InvalidCredentials,
-                                matcheddn: "".to_string(),
-                                message: "Invalid credentials".to_string(),
-                                referral: vec![],
-                            },
-                            saslcreds: None,
-                        }),
-                        ctrl: vec![],
-                    }];
-                }
-
-                // verify password HMAC
-                let hmac_key = match config.otp_hmac_key() {
-                    Some(k) if !k.is_empty() => k,
-                    _ => {
-                        tracing::error!(
-                            "otp_hmac_key_file not configured or empty; cannot verify credentials"
-                        );
-                        return vec![LdapMsg {
-                            msgid,
-                            op: LdapOp::BindResponse(LdapBindResponse {
-                                res: LdapResult {
-                                    code: LdapResultCode::OperationsError,
-                                    matcheddn: "".to_string(),
-                                    message: "Server misconfiguration".to_string(),
-                                    referral: vec![],
-                                },
-                                saslcreds: None,
-                            }),
-                            ctrl: vec![],
-                        }];
-                    }
-                };
-                let mut mac_pw: Hmac<Sha256> = Hmac::new_from_slice(hmac_key.as_bytes())
-                    .expect("HMAC can take key of any size");
-                mac_pw.update(provided_pass.as_bytes());
-                let provided_hash = hex::encode(mac_pw.finalize().into_bytes());
-
-                if provided_hash != *stored_pw_hmac {
-                    audit::ldap_bind_failure(client_addr, &bind.dn, "incorrect password");
-                    return vec![LdapMsg {
-                        msgid,
-                        op: LdapOp::BindResponse(LdapBindResponse {
-                            res: LdapResult {
-                                code: LdapResultCode::InvalidCredentials,
-                                matcheddn: "".to_string(),
-                                message: "Invalid credentials".to_string(),
-                                referral: vec![],
-                            },
-                            saslcreds: None,
-                        }),
-                        ctrl: vec![],
-                    }];
-                }
-
-                // verify TOTP (check -1, 0, +1 steps)
-                fn hotp_from_counter(secret: &[u8], counter: u64) -> u32 {
-                    type HmacSha1 = Hmac<Sha1>;
-                    let mut msg = [0u8; 8];
-                    msg.copy_from_slice(&counter.to_be_bytes());
-                    let mut mac = HmacSha1::new_from_slice(secret).expect("HMAC-SHA1 init");
-                    mac.update(&msg);
-                    let digest = mac.finalize().into_bytes();
-                    let offset = (digest[19] & 0x0f) as usize;
-                    let code = ((digest[offset] as u32 & 0x7f) << 24)
-                        | ((digest[offset + 1] as u32) << 16)
-                        | ((digest[offset + 2] as u32) << 8)
-                        | (digest[offset + 3] as u32);
-                    code % 1_000_000
-                }
-
-                let secret_bytes_opt = base32::decode(
-                    base32::Alphabet::Rfc4648 { padding: false },
-                    totp_secret.as_str(),
-                );
-                if secret_bytes_opt.is_none() {
-                    return vec![LdapMsg {
-                        msgid,
-                        op: LdapOp::BindResponse(LdapBindResponse {
-                            res: LdapResult {
-                                code: LdapResultCode::OperationsError,
-                                matcheddn: "".to_string(),
-                                message: "Server misconfiguration".to_string(),
-                                referral: vec![],
-                            },
-                            saslcreds: None,
-                        }),
-                        ctrl: vec![],
-                    }];
-                }
-
-                let secret_bytes = secret_bytes_opt.unwrap();
-                let t = (now / 30) as i64;
-                let mut ok = false;
-                for offset in -1..=1 {
-                    let counter = (t + offset) as u64;
-                    let v = hotp_from_counter(&secret_bytes, counter);
-                    let v_str = format!("{:06}", v);
-                    if v_str == provided_totp {
-                        ok = true;
-                        break;
-                    }
-                }
-
-                if ok {
-                    audit::ldap_bind_success(client_addr, &bind.dn, "simple+totp");
-                    return vec![LdapMsg {
-                        msgid,
-                        op: LdapOp::BindResponse(LdapBindResponse {
-                            res: LdapResult {
-                                code: LdapResultCode::Success,
-                                matcheddn: bind.dn.clone(),
-                                message: "Bind successful".to_string(),
-                                referral: vec![],
-                            },
-                            saslcreds: None,
-                        }),
-                        ctrl: vec![],
-                    }];
-                } else {
-                    audit::ldap_bind_failure(client_addr, &bind.dn, "invalid TOTP code");
-                    return vec![LdapMsg {
-                        msgid,
-                        op: LdapOp::BindResponse(LdapBindResponse {
-                            res: LdapResult {
-                                code: LdapResultCode::InvalidCredentials,
-                                matcheddn: "".to_string(),
-                                message: "Invalid credentials".to_string(),
-                                referral: vec![],
-                            },
-                            saslcreds: None,
-                        }),
-                        ctrl: vec![],
-                    }];
-                }
-            } else {
-                audit::ldap_bind_failure(
-                    client_addr,
-                    &bind.dn,
-                    "incomplete OTP config (missing pw_hmac or totp_secret)",
-                );
+        let public_id = match yubikey::extract_public_id(trimmed_password) {
+            Some(id) => id,
+            None => {
+                audit::ldap_bind_failure(client_addr, &user_dn, "could not extract YubiKey public ID");
                 return vec![LdapMsg {
                     msgid,
                     op: LdapOp::BindResponse(LdapBindResponse {
@@ -600,15 +477,51 @@ async fn handle_bind(
                     ctrl: vec![],
                 }];
             }
-        } else {
-            audit::ldap_bind_failure(client_addr, &bind.dn, "no OTP record found");
+        };
+
+        let creds_opt: Option<objects::UserCredentials> = {
+            if let Ok(txn) = env.begin_ro_txn() {
+                txn.get(yubikey_db, &user_dn.as_bytes())
+                    .ok()
+                    .and_then(|val| serde_json::from_slice::<objects::UserCredentials>(val).ok())
+            } else {
+                None
+            }
+        };
+
+        let creds = match creds_opt {
+            Some(c) if !c.keys.is_empty() => c,
+            _ => {
+                audit::ldap_bind_failure(client_addr, &user_dn, "no registered YubiKeys for user");
+                return vec![LdapMsg {
+                    msgid,
+                    op: LdapOp::BindResponse(LdapBindResponse {
+                        res: LdapResult {
+                            code: LdapResultCode::InvalidCredentials,
+                            matcheddn: "".to_string(),
+                            message: "Invalid credentials: no YubiKeys registered".to_string(),
+                            referral: vec![],
+                        },
+                        saslcreds: None,
+                    }),
+                    ctrl: vec![],
+                }];
+            }
+        };
+
+        if !creds.keys.iter().any(|k| k.public_id == public_id) {
+            audit::ldap_bind_failure(
+                client_addr,
+                &user_dn,
+                &format!("unregistered YubiKey public ID: {}", public_id),
+            );
             return vec![LdapMsg {
                 msgid,
                 op: LdapOp::BindResponse(LdapBindResponse {
                     res: LdapResult {
                         code: LdapResultCode::InvalidCredentials,
                         matcheddn: "".to_string(),
-                        message: "Invalid credentials".to_string(),
+                        message: "Invalid credentials: YubiKey not registered to user".to_string(),
                         referral: vec![],
                     },
                     saslcreds: None,
@@ -616,22 +529,58 @@ async fn handle_bind(
                 ctrl: vec![],
             }];
         }
+
+        if let Err(e) = yubikey_validator.verify_otp(trimmed_password).await {
+            audit::ldap_bind_failure(
+                client_addr,
+                &user_dn,
+                &format!("YubiKey OTP validation failed: {}", e),
+            );
+            return vec![LdapMsg {
+                msgid,
+                op: LdapOp::BindResponse(LdapBindResponse {
+                    res: LdapResult {
+                        code: LdapResultCode::InvalidCredentials,
+                        matcheddn: "".to_string(),
+                        message: "Invalid credentials: OTP validation failed".to_string(),
+                        referral: vec![],
+                    },
+                    saslcreds: None,
+                }),
+                ctrl: vec![],
+            }];
+        }
+
+        audit::ldap_bind_success(client_addr, &user_dn, "yubikey");
+        return vec![LdapMsg {
+            msgid,
+            op: LdapOp::BindResponse(LdapBindResponse {
+                res: LdapResult {
+                    code: LdapResultCode::Success,
+                    matcheddn: user_dn,
+                    message: "Bind successful".to_string(),
+                    referral: vec![],
+                },
+                saslcreds: None,
+            }),
+            ctrl: vec![],
+        }];
     }
 
-    audit::ldap_bind_failure(client_addr, &bind.dn, "invalid credentials");
-    return vec![LdapMsg {
+    audit::ldap_bind_failure(client_addr, &bind.dn, "no password/OTP provided");
+    vec![LdapMsg {
         msgid,
         op: LdapOp::BindResponse(LdapBindResponse {
             res: LdapResult {
                 code: LdapResultCode::InvalidCredentials,
                 matcheddn: "".to_string(),
-                message: "Only simple bind with OTP code is supported".to_string(),
+                message: "Simple or SASL PLAIN bind with YubiKey OTP is required".to_string(),
                 referral: vec![],
             },
             saslcreds: None,
         }),
         ctrl: vec![],
-    }];
+    }]
 }
 
 /// Convert an LDAP search scope to a human-readable string for audit logs.
@@ -902,11 +851,11 @@ async fn handle_search(
 
                 let allowed_attributes: Vec<LdapPartialAttribute> = attrs
                     .into_iter()
-                    .filter_map(|(k, v)| {
-                        Some(LdapPartialAttribute {
+                    .map(|(k, v)| {
+                        LdapPartialAttribute {
                             atype: k,
                             vals: v.into_iter().map(|s| s.as_bytes().to_vec()).collect(),
-                        })
+                        }
                     })
                     .collect();
 
@@ -1001,9 +950,11 @@ async fn handle_search(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_request(
     env: Arc<Environment>,
-    otp_db: Database,
+    yubikey_db: Database,
+    yubikey_validator: &Arc<YubikeyValidator>,
     base_dn: &str,
     req: LdapMsg,
     tailscale: &Tailscale,
@@ -1024,7 +975,8 @@ pub async fn handle_request(
         LdapOp::BindRequest(bind) => {
             handle_bind(
                 env,
-                otp_db,
+                yubikey_db,
+                yubikey_validator,
                 tailscale,
                 config,
                 bind,

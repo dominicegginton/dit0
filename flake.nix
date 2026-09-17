@@ -66,11 +66,18 @@
 
         dit0-test = nixpkgsFor.${system}.callPackage ./nix/test.nix {
           dit0-module = self.outputs.nixosModules.default;
+          dit0-client-module = self.outputs.nixosModules.client;
           dit0-package = nixpkgsFor.${system}.dit0;
         };
       });
 
-      # NixOS Module to declare configurations and run services.
-      nixosModules.default = ./nix/module.nix;
+      # NixOS Modules to declare configurations and run services / clients.
+      nixosModules = {
+        default = ./nix/module.nix;
+        server = ./nix/module.nix;
+        client = ./nix/client.nix;
+        dit0 = ./nix/module.nix;
+        dit0-client = ./nix/client.nix;
+      };
     };
 }

@@ -8,10 +8,12 @@ mod ldap;
 mod objects;
 mod state;
 mod tailscale;
+mod yubikey;
 
 use crate::http::server::HttpsServer;
 use crate::http::server::Server;
 use crate::ldap::LdapServer;
+use crate::yubikey::YubikeyValidator;
 
 use lmdb::Environment;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -20,9 +22,11 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
 
-    let _ = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(fmt_layer)
         .try_init()
         .expect("failed to initialize tracing");
@@ -51,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     match ts_api.status().await {
         Ok(s) => {
             if let Some(arr) = s.get("CertDomains").and_then(|v| v.as_array()) {
-                if let Some(first) = arr.get(0).and_then(|v| v.as_str()) {
+                if let Some(first) = arr.first().and_then(|v| v.as_str()) {
                     preferred_cert_domain = first.to_string();
                 }
             } else if let Some(dnsname) = s
@@ -76,9 +80,9 @@ async fn main() -> anyhow::Result<()> {
 
     let flags = lmdb::DatabaseFlags::empty();
 
-    let otp_db = env
-        .create_db(Some("otp"), flags)
-        .expect("Failed to create OTP database");
+    let yubikey_db = env
+        .create_db(Some("yubikey"), flags)
+        .expect("Failed to create YubiKey database");
 
     let audit_db = env
         .create_db(Some("audit"), flags)
@@ -98,10 +102,17 @@ async fn main() -> anyhow::Result<()> {
 
     let audit_log = audit::init(env.clone(), audit_db);
 
+    let yubikey_validator = Arc::new(YubikeyValidator::new(
+        config.yubico_client_id.clone(),
+        config.yubico_secret_key(),
+        config.yubico_api_url.clone(),
+    ));
+
     let state = crate::state::State {
         config: config.clone(),
         tailscale: ts_api.clone(),
-        otp_db: otp_db.clone(),
+        yubikey_db,
+        yubikey_validator,
         env: env.clone(),
         ts_net: Arc::new(ts_net),
         certs: certs_store.clone(),

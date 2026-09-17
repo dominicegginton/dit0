@@ -1,6 +1,7 @@
 use super::auth::{require_allow_admin_ui, require_user};
 use super::handlers::{
-    admin_audit_api, admin_dashboard, credentials_reset, credentials_setup, user,
+    admin_audit_api, admin_dashboard, admin_key_register, admin_key_revoke, credentials_reset,
+    credentials_setup, user,
 };
 use super::state::AppState;
 use crate::tailscale::UserClaims;
@@ -58,6 +59,8 @@ impl Server for HttpsServer {
         let admin_routes = Router::new()
             .route("/admin", get(admin_dashboard))
             .route("/admin/api/audit", get(admin_audit_api))
+            .route("/admin/keys/register", post(admin_key_register))
+            .route("/admin/keys/revoke", post(admin_key_revoke))
             .route_layer(middleware::from_fn(require_allow_admin_ui));
 
         let app = Router::new()
@@ -78,7 +81,7 @@ impl Server for HttpsServer {
             loop {
                 match listener.accept() {
                     Ok(stream) => {
-                        let _ = stream
+                        stream
                             .set_nonblocking(true)
                             .expect("Failed to set nonblocking on stream");
 
@@ -142,30 +145,30 @@ impl Server for HttpsServer {
                                                 }
                                                 _ => {
                                                     let cap_map = w.cap_map.clone().unwrap_or_default();
-                                                    let bindable = cap_map.get("dominicegginton.dev/cap/tsdit0").map_or(false, |val| {
+                                                    let bindable = cap_map.get("dominicegginton.dev/cap/tsdit0").is_some_and(|val| {
                                                         if let serde_json::Value::Array(arr) = val {
                                                             arr.iter().any(|item| {
                                                                 if let serde_json::Value::Object(obj) = item {
-                                                                    obj.get("allow_bind").map_or(false, |v| matches!(v, serde_json::Value::Bool(true)))
+                                                                    obj.get("allow_bind").is_some_and(|v| matches!(v, serde_json::Value::Bool(true)))
                                                                 } else {
                                                                     false
                                                                 }
                                                             })
                                                         } else if let serde_json::Value::Object(obj) = val {
-                                                            obj.get("allow_bind").map_or(false, |v| matches!(v, serde_json::Value::Bool(true)))
+                                                            obj.get("allow_bind").is_some_and(|v| matches!(v, serde_json::Value::Bool(true)))
                                                         } else {
                                                             false
                                                         }
                                                     });
-                                                    let reasons_vec: Vec<String> = if bindable {
+                                                    let _reasons_vec: Vec<String> = if bindable {
                                                         if let Some(serde_json::Value::Array(arr)) = cap_map.get("dominicegginton.dev/cap/tsdit0") {
                                                             arr.iter().filter_map(|item| {
                                                                 if let serde_json::Value::Object(obj) = item {
                                                                     let mut reason_parts = Vec::new();
-                                                                    if obj.get("allow_bind").map_or(false, |v| matches!(v, serde_json::Value::Bool(true))) {
+                                                                    if obj.get("allow_bind").is_some_and(|v| matches!(v, serde_json::Value::Bool(true))) {
                                                                         reason_parts.push("allow_bind".to_string());
                                                                     }
-                                                                    if obj.get("allow_admin_ui").map_or(false, |v| matches!(v, serde_json::Value::Bool(true))) {
+                                                                    if obj.get("allow_admin_ui").is_some_and(|v| matches!(v, serde_json::Value::Bool(true))) {
                                                                         reason_parts.push("allow_admin_ui".to_string());
                                                                     }
                                                                     if let Some(serde_json::Value::Array(list)) = obj.get("tsdit_machines") {
@@ -199,7 +202,7 @@ impl Server for HttpsServer {
 
 
 
-                            let _ = http1::Builder::new().serve_connection(io, service).await.expect("Failed to serve connection");
+                            http1::Builder::new().serve_connection(io, service).await.expect("Failed to serve connection");
                         });
                     }
                     Err(e) => {

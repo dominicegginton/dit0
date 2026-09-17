@@ -13,7 +13,9 @@ pub struct Config {
     pub base_dn: String,
     pub ts_hostname: String,
     pub ts_auth_key_file: Option<String>,
-    pub otp_hmac_key_file: String,
+    pub yubico_client_id: Option<String>,
+    pub yubico_secret_key_file: Option<String>,
+    pub yubico_api_url: Option<String>,
     pub data_dir: String,
 }
 
@@ -26,9 +28,7 @@ impl Config {
         }
 
         let content = fs::read_to_string(&config_path).expect("failed to read config file");
-        let config = serde_json::from_str::<Config>(&content).expect("failed to parse config file");
-
-        config
+        serde_json::from_str::<Config>(&content).expect("failed to parse config file")
     }
 
     pub fn ts_api_key(&self) -> Option<String> {
@@ -37,15 +37,16 @@ impl Config {
             .map(|s| s.trim().to_string())
     }
 
+    #[allow(dead_code)]
     pub fn ts_auth_key(&self) -> Option<String> {
         self.ts_auth_key_file
             .as_ref()
             .and_then(|path| fs::read_to_string(path).ok().map(|s| s.trim().to_string()))
     }
 
-    pub fn otp_hmac_key(&self) -> Option<String> {
-        fs::read_to_string(&self.otp_hmac_key_file)
-            .ok()
-            .map(|s| s.trim().to_string())
+    pub fn yubico_secret_key(&self) -> Option<String> {
+        self.yubico_secret_key_file
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok().map(|s| s.trim().to_string()))
     }
 }
